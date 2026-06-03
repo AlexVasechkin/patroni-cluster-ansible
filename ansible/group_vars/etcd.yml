@@ -1,0 +1,15 @@
+# ============================================================
+# Переменные только для группы [etcd]
+# ============================================================
+
+# Директории etcd
+etcd_data_dir: "/var/lib/etcd"
+etcd_config_dir: "/etc/etcd"
+etcd_bin_dir: "/usr/local/bin"
+
+# URL для скачивания etcd
+etcd_download_url: "https://github.com/etcd-io/etcd/releases/download/v{{ etcd_version }}/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+
+# Системный пользователь для etcd
+etcd_user: "etcd"
+etcd_group: "etcd"

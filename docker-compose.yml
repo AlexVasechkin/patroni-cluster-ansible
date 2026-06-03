@@ -1,0 +1,144 @@
+# ============================================================
+# Инфраструктура Patroni-кластера
+#
+# Топология:
+#   etcd1  172.20.0.11  — etcd node 1 (DCS — Distributed Configuration Store)
+#   etcd2  172.20.0.12  — etcd node 2
+#   etcd3  172.20.0.13  — etcd node 3
+#   pg1    172.20.0.21  — PostgreSQL / Patroni (будущий primary)
+#   pg2    172.20.0.22  — PostgreSQL / Patroni (будущий replica)
+#
+# Все контейнеры собраны из одного Dockerfile (Ubuntu 24.04 + systemd + SSH).
+# Ansible подключается к ним по SSH с хост-машины через проброшенные порты.
+# ============================================================
+
+networks:
+  patroni-net:
+    name: patroni-net
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.20.0.0/24
+          gateway: 172.20.0.1
+
+# -----------------------------------------------------------
+# Общие настройки для всех узлов вынесены в x-node-common
+# (YAML anchor — не дублируем повторяющийся код)
+# -----------------------------------------------------------
+x-node-common: &node-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  # privileged нужен, чтобы systemd мог работать внутри контейнера
+  privileged: true
+  volumes:
+    # cgroup монтируем с хоста — без этого systemd не стартует
+    - /sys/fs/cgroup:/sys/fs/cgroup:rw
+  # Контейнер перезапускается только если упал сам (не при docker stop)
+  restart: unless-stopped
+  # Зависимость от сети — подождать, пока сеть создана
+  networks:
+    - patroni-net
+
+services:
+
+  # ----------------------------------------------------------
+  # ETCD CLUSTER (3 ноды — кворум для отказоустойчивости)
+  # Patroni использует etcd как DCS (Distributed Configuration Store)
+  # для хранения информации о лидере и конфигурации кластера.
+  # 3 ноды — минимум для отказоустойчивости (допускает падение 1 ноды).
+  # ----------------------------------------------------------
+
+  etcd1:
+    <<: *node-common
+    container_name: etcd1
+    hostname: etcd1
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.11
+    ports:
+      # SSH для Ansible (с хоста: ssh -p 2221 ansible@localhost)
+      - "2221:22"
+      # etcd client API (Patroni и etcdctl общаются с кластером)
+      - "2379:2379"
+      # etcd peer communication (репликация между etcd-нодами)
+      - "2380:2380"
+
+  etcd2:
+    <<: *node-common
+    container_name: etcd2
+    hostname: etcd2
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.12
+    ports:
+      - "2222:22"
+      - "2381:2379"
+      - "2382:2380"
+
+  etcd3:
+    <<: *node-common
+    container_name: etcd3
+    hostname: etcd3
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.13
+    ports:
+      - "2223:22"
+      - "2383:2379"
+      - "2384:2380"
+
+  # ----------------------------------------------------------
+  # POSTGRESQL + PATRONI (2 ноды — primary + replica)
+  # pg1 — изначально станет primary после инициализации кластера.
+  # pg2 — реплика, автоматически сделает streaming replication с primary.
+  # При падении primary — Patroni выберет новый primary через etcd.
+  # ----------------------------------------------------------
+
+  pg1:
+    <<: *node-common
+    container_name: pg1
+    hostname: pg1
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.21
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Данные PostgreSQL — persist между перезапусками
+      - pg1-data:/var/lib/postgresql
+    ports:
+      - "2224:22"
+      # PostgreSQL (primary доступен с хоста напрямую)
+      - "5432:5432"
+      # Patroni REST API (healthcheck, switchover, etc.)
+      - "8008:8008"
+
+  pg2:
+    <<: *node-common
+    container_name: pg2
+    hostname: pg2
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.22
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Данные PostgreSQL реплики
+      - pg2-data:/var/lib/postgresql
+    ports:
+      - "2225:22"
+      # Реплика доступна на другом порту хоста
+      - "5433:5432"
+      # Patroni REST API реплики
+      - "8009:8008"
+
+# -----------------------------------------------------------
+# Named volumes для данных PostgreSQL
+# Данные живут в Docker-томах и не теряются при docker-compose down
+# (только docker-compose down -v удалит данные)
+# -----------------------------------------------------------
+volumes:
+  pg1-data:
+    name: patroni_pg1_data
+  pg2-data:
+    name: patroni_pg2_data

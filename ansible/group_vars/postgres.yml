@@ -1,0 +1,28 @@
+# ============================================================
+# Переменные только для группы [postgres]
+# ============================================================
+
+# Директории PostgreSQL и Patroni
+postgresql_data_dir: "/var/lib/postgresql/{{ postgresql_version }}/data"
+postgresql_config_dir: "/etc/postgresql/{{ postgresql_version }}/main"
+patroni_config_dir: "/etc/patroni"
+patroni_log_dir: "/var/log/patroni"
+
+# Порты
+postgresql_port: 5432
+patroni_api_port: 8008
+
+# Параметры PostgreSQL (можно переопределить для конкретного хоста)
+postgresql_max_connections: 100
+postgresql_shared_buffers: "256MB"
+postgresql_wal_level: "replica"
+postgresql_max_wal_senders: 10
+postgresql_max_replication_slots: 10
+postgresql_hot_standby: "on"
+postgresql_wal_log_hints: "on"
+
+# Параметры Patroni
+patroni_ttl: 30
+patroni_loop_wait: 10
+patroni_retry_timeout: 30
+patroni_maximum_lag_on_failover: 1048576  # 1MB

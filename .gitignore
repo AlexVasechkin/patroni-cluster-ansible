@@ -1,0 +1,11 @@
+# SSH private key — никогда не коммитить!
+ssh/id_rsa
+
+# Docker volumes data
+data/
+
+# Ansible retry files
+ansible/*.retry
+
+# macOS
+.DS_Store

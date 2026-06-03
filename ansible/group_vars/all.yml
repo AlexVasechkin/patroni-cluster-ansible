@@ -1,0 +1,41 @@
+# ============================================================
+# Переменные, общие для всех хостов
+# ============================================================
+
+# Версия etcd для установки
+etcd_version: "3.5.13"
+
+# Версия PostgreSQL
+postgresql_version: "16"
+
+# Имя кластера Patroni (используется в конфигах и etcd)
+patroni_cluster_name: "pg-cluster"
+
+# Сеть кластера
+cluster_subnet: "172.20.0.0/24"
+
+# IP-адреса etcd-нод (используются в конфиге Patroni и etcd)
+etcd_nodes:
+  - name: etcd1
+    ip: "172.20.0.11"
+    client_port: 2379
+    peer_port: 2380
+  - name: etcd2
+    ip: "172.20.0.12"
+    client_port: 2379
+    peer_port: 2380
+  - name: etcd3
+    ip: "172.20.0.13"
+    client_port: 2379
+    peer_port: 2380
+
+# Строка подключения к etcd-кластеру (используется в Patroni)
+etcd_endpoints: "http://172.20.0.11:2379,http://172.20.0.12:2379,http://172.20.0.13:2379"
+
+# Пользователь и пароль PostgreSQL для репликации
+patroni_replication_user: "replicator"
+patroni_replication_password: "replicator_pass"
+
+# Суперпользователь PostgreSQL
+patroni_superuser: "postgres"
+patroni_superuser_password: "postgres_pass"
