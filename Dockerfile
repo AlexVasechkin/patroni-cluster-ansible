@@ -92,6 +92,11 @@ RUN chmod 600 /home/ansible/.ssh/authorized_keys && \
 # Включаем SSH при старте systemd
 RUN systemctl enable ssh
 
+# Ubuntu 24.04 по умолчанию использует graphical.target,
+# часть его зависимостей недоступна в контейнере → systemd уходит в rescue.
+# Явно переключаем на multi-user.target.
+RUN systemctl set-default multi-user.target
+
 EXPOSE 22
 
 # cgroup монтируется с хоста (нужен systemd)

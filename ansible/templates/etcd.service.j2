@@ -1,0 +1,43 @@
+# ============================================================
+# Systemd unit для etcd
+# Сгенерировано Ansible — не редактировать вручную
+# ============================================================
+[Unit]
+Description=etcd — надёжное распределённое key-value хранилище
+Documentation=https://etcd.io/docs/
+# Запускаемся только после того как сеть готова
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+
+# Запускаем от системного пользователя etcd (не root)
+User={{ etcd_user }}
+Group={{ etcd_group }}
+
+# Путь к конфигу передаём через флаг --config-file
+ExecStart={{ etcd_bin_dir }}/etcd --config-file {{ etcd_config_dir }}/etcd.conf.yml
+
+# Перезапуск при аварийном завершении (не при systemctl stop)
+Restart=on-failure
+RestartSec=5s
+
+# Снимаем ограничение на количество открытых файлов.
+# etcd держит много сокетов и файловых дескрипторов.
+LimitNOFILE=65536
+
+# ----------------------------------------------------------
+# Параметры безопасности systemd
+# ----------------------------------------------------------
+# Запрещаем процессу получать новые привилегии
+NoNewPrivileges=true
+# Корневая FS только на чтение, кроме явно разрешённых путей
+ProtectSystem=strict
+# Разрешаем запись только в директорию с данными
+ReadWritePaths={{ etcd_data_dir }}
+# Запрещаем доступ к домашним директориям пользователей
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

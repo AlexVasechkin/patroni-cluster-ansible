@@ -1,0 +1,345 @@
+---
+# ============================================================
+# Playbook 01: Установка и настройка etcd кластера
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini 01_etcd_playbook.yml
+#
+# Verbose (видно что делает каждая задача):
+#   ansible-playbook -i inventory.ini 01_etcd_playbook.yml -v
+#
+# Dry-run (проверить без изменений):
+#   ansible-playbook -i inventory.ini 01_etcd_playbook.yml --check
+#
+# Только конкретная нода:
+#   ansible-playbook -i inventory.ini 01_etcd_playbook.yml --limit etcd1
+#
+# Теория:
+#   etcd — это распределённое key-value хранилище на базе алгоритма Raft.
+#   Patroni использует etcd как DCS (Distributed Configuration Store) для:
+#     - хранения информации о текущем лидере кластера PG
+#     - координации failover при падении primary
+#     - хранения конфигурации кластера
+#
+#   3 ноды — минимум для кворума: кластер работает, пока жива хотя бы
+#   половина нод + 1, то есть 2 из 3.
+# ============================================================
+
+- name: "Установка и настройка etcd кластера"
+  hosts: etcd
+  become: true
+  gather_facts: true
+
+  # ----------------------------------------------------------
+  # Pre-tasks: выполняются ДО основных task'ов
+  # Используем для проверки предусловий и обновления пакетов
+  # ----------------------------------------------------------
+  pre_tasks:
+
+    - name: "PRE | Обновляем кэш apt"
+      apt:
+        update_cache: true
+        cache_valid_time: 3600  # не обновляем если кэш свежее 1 часа
+
+    - name: "PRE | Устанавливаем вспомогательные пакеты"
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - tar
+          - gzip
+        state: present
+
+    - name: "PRE | Выводим информацию о текущей ноде"
+      debug:
+        msg:
+          - "Хост: {{ inventory_hostname }}"
+          - "IP в кластере: {{ etcd_node_ip }}"
+          - "Версия etcd: {{ etcd_version }}"
+
+  # ----------------------------------------------------------
+  # ОСНОВНЫЕ ЗАДАЧИ
+  # ----------------------------------------------------------
+  tasks:
+
+    # ==========================================================
+    # БЛОК 1: Создание системного пользователя
+    #
+    # Почему нужен отдельный пользователь:
+    #   Запуск сервиса не от root — базовый принцип безопасности.
+    #   Если процесс взломан, атакующий получает права etcd,
+    #   а не root.
+    # ==========================================================
+
+    - name: "1.1 | Создаём системную группу etcd"
+      group:
+        name: "{{ etcd_group }}"
+        system: true    # системная группа (GID < 1000)
+        state: present
+
+    - name: "1.2 | Создаём системного пользователя etcd"
+      user:
+        name: "{{ etcd_user }}"
+        group: "{{ etcd_group }}"
+        shell: /sbin/nologin    # нельзя войти интерактивно
+        system: true
+        home: "{{ etcd_data_dir }}"
+        create_home: false      # директорию создадим вручную ниже
+        state: present
+
+    - name: "1.3 | Создаём директории для etcd"
+      file:
+        path: "{{ item.path }}"
+        state: directory
+        owner: "{{ etcd_user }}"
+        group: "{{ etcd_group }}"
+        mode: "{{ item.mode }}"
+      loop:
+        # Данные etcd: raft-лог, снапшоты, WAL
+        - { path: "{{ etcd_data_dir }}", mode: "0700" }
+        # Конфигурационные файлы
+        - { path: "{{ etcd_config_dir }}", mode: "0755" }
+
+    # ==========================================================
+    # БЛОК 2: Установка бинарников etcd
+    #
+    # Устанавливаем из официального релиза GitHub, а не из apt.
+    # Причина: apt обычно содержит устаревшую версию.
+    # ==========================================================
+
+    - name: "2.1 | Проверяем, установлен ли уже etcd нужной версии"
+      command: "{{ etcd_bin_dir }}/etcd --version"
+      register: etcd_installed_version
+      changed_when: false
+      failed_when: false  # не падаем если etcd не установлен
+
+    - name: "2.2 | Скачиваем архив etcd v{{ etcd_version }}"
+      get_url:
+        url: "{{ etcd_download_url }}"
+        dest: "/tmp/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+        mode: "0644"
+        # Ansible сам проверяет Content-Length и докачивает при обрыве
+      # Пропускаем если нужная версия уже установлена
+      when: etcd_version not in (etcd_installed_version.stdout | default(''))
+
+    - name: "2.3 | Распаковываем архив etcd"
+      unarchive:
+        src: "/tmp/etcd-v{{ etcd_version }}-linux-amd64.tar.gz"
+        dest: "/tmp/"
+        remote_src: true   # архив уже на managed node, не на control node
+        # creates= — пропустить задачу если файл уже существует (идемпотентность)
+        creates: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/etcd"
+      when: etcd_version not in (etcd_installed_version.stdout | default(''))
+
+    - name: "2.4 | Копируем бинарники в {{ etcd_bin_dir }}"
+      copy:
+        src: "/tmp/etcd-v{{ etcd_version }}-linux-amd64/{{ item }}"
+        dest: "{{ etcd_bin_dir }}/{{ item }}"
+        owner: root
+        group: root
+        mode: "0755"
+        remote_src: true
+      loop:
+        - etcd       # основной процесс
+        - etcdctl    # CLI для управления кластером
+      notify: restart etcd  # перезапустить сервис если бинарник изменился
+
+    - name: "2.5 | Проверяем версию установленного etcd"
+      command: "{{ etcd_bin_dir }}/etcd --version"
+      register: etcd_version_check
+      changed_when: false
+
+    - name: "2.5 | Показываем версию etcd"
+      debug:
+        msg: "{{ etcd_version_check.stdout_lines[0] }}"
+
+    # ==========================================================
+    # БЛОК 3: Конфигурация etcd
+    #
+    # Каждая нода получает свой конфиг на основе одного шаблона.
+    # Jinja2 подставляет переменные (IP, имя ноды, список peers).
+    #
+    # Как это работает:
+    #   Ansible берёт templates/etcd.conf.yml.j2
+    #   → подставляет переменные (inventory_hostname, etcd_node_ip...)
+    #   → кладёт результат в {{ etcd_config_dir }}/etcd.conf.yml
+    #   на КАЖДОЙ ноде группы [etcd]
+    # ==========================================================
+
+    - name: "3.1 | Генерируем конфиг etcd для {{ inventory_hostname }}"
+      template:
+        src: etcd.conf.yml.j2
+        dest: "{{ etcd_config_dir }}/etcd.conf.yml"
+        owner: "{{ etcd_user }}"
+        group: "{{ etcd_group }}"
+        mode: "0640"     # только etcd-пользователь читает конфиг
+        # validate= — проверяем конфиг перед применением
+        # (у etcd нет встроенного validate, поэтому пропускаем)
+      notify: restart etcd
+
+    - name: "3.2 | Показываем сгенерированный конфиг (для отладки)"
+      slurp:
+        src: "{{ etcd_config_dir }}/etcd.conf.yml"
+      register: etcd_config_content
+
+    - name: "3.2 | Содержимое конфига на {{ inventory_hostname }}"
+      debug:
+        msg: "{{ etcd_config_content.content | b64decode }}"
+
+    # ==========================================================
+    # БЛОК 4: Systemd unit файл
+    #
+    # Systemd unit описывает:
+    #   - как запустить процесс (ExecStart)
+    #   - от кого запускать (User/Group)
+    #   - когда запускать (After/Wants)
+    #   - что делать при сбое (Restart)
+    # ==========================================================
+
+    - name: "4.1 | Создаём systemd unit для etcd"
+      template:
+        src: etcd.service.j2
+        dest: /etc/systemd/system/etcd.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify:
+        - reload systemd daemon
+        - restart etcd
+
+    # ==========================================================
+    # БЛОК 5: Запуск etcd
+    #
+    # ВАЖНО: все три ноды должны запуститься почти одновременно.
+    # При initial-cluster-state=new каждая нода ждёт кворума
+    # (2 из 3) прежде чем принять запросы.
+    # Ansible по умолчанию выполняет задачи на всех хостах
+    # параллельно (forks=5), что нам и нужно.
+    # ==========================================================
+
+    - name: "5.1 | Принудительно перезагружаем systemd daemon"
+      systemd:
+        daemon_reload: true
+
+    - name: "5.2 | Включаем etcd в автозапуск и стартуем"
+      systemd:
+        name: etcd
+        state: started
+        enabled: true
+
+    # ==========================================================
+    # БЛОК 6: Проверка здоровья кластера
+    # ==========================================================
+
+    - name: "6.1 | Ждём, пока etcd начнёт слушать порт 2379"
+      wait_for:
+        host: "127.0.0.1"
+        port: 2379
+        timeout: 60       # максимум ждём 60 секунд
+        state: started
+        delay: 3          # первая проверка через 3 секунды
+
+    - name: "6.2 | Проверяем здоровье локального etcd endpoint"
+      command: >
+        {{ etcd_bin_dir }}/etcdctl
+        --endpoints=http://{{ etcd_node_ip }}:2379
+        endpoint health
+      environment:
+        ETCDCTL_API: "3"   # используем API v3 (v2 устарел)
+      register: etcd_health
+      changed_when: false
+      retries: 5           # повторяем до 5 раз если кластер ещё не выбрал лидера
+      delay: 5
+      until: etcd_health.rc == 0
+
+    - name: "6.2 | Статус здоровья {{ inventory_hostname }}"
+      debug:
+        msg: "{{ etcd_health.stdout }}"
+
+    # Следующие задачи выполняем только один раз (на etcd1)
+    # т.к. они показывают состояние всего кластера
+
+    - name: "6.3 | Получаем список всех членов кластера"
+      command: >
+        {{ etcd_bin_dir }}/etcdctl
+        --endpoints={{ etcd_endpoints }}
+        member list --write-out=table
+      environment:
+        ETCDCTL_API: "3"
+      register: etcd_members
+      changed_when: false
+      run_once: true   # выполняем только на первой ноде из группы
+
+    - name: "6.3 | Члены кластера etcd"
+      debug:
+        msg: "{{ etcd_members.stdout_lines }}"
+      run_once: true
+
+    - name: "6.4 | Получаем статус endpoint'ов кластера"
+      command: >
+        {{ etcd_bin_dir }}/etcdctl
+        --endpoints={{ etcd_endpoints }}
+        endpoint status --write-out=table
+      environment:
+        ETCDCTL_API: "3"
+      register: etcd_status
+      changed_when: false
+      run_once: true
+
+    - name: "6.4 | Статус всех endpoint'ов (IS LEADER — кто лидер)"
+      debug:
+        msg: "{{ etcd_status.stdout_lines }}"
+      run_once: true
+
+    - name: "6.5 | Финальная проверка — пишем тестовый ключ и читаем его"
+      block:
+        - name: "Записываем тестовый ключ в etcd"
+          command: >
+            {{ etcd_bin_dir }}/etcdctl
+            --endpoints={{ etcd_endpoints }}
+            put /patroni/test "etcd-cluster-ok"
+          environment:
+            ETCDCTL_API: "3"
+          changed_when: false
+
+        - name: "Читаем тестовый ключ из etcd"
+          command: >
+            {{ etcd_bin_dir }}/etcdctl
+            --endpoints={{ etcd_endpoints }}
+            get /patroni/test
+          environment:
+            ETCDCTL_API: "3"
+          register: etcd_test_read
+          changed_when: false
+
+        - name: "Результат теста"
+          debug:
+            msg: "Чтение ключа: {{ etcd_test_read.stdout }}"
+
+        - name: "Удаляем тестовый ключ"
+          command: >
+            {{ etcd_bin_dir }}/etcdctl
+            --endpoints={{ etcd_endpoints }}
+            del /patroni/test
+          environment:
+            ETCDCTL_API: "3"
+          changed_when: false
+
+      run_once: true   # весь block выполняем один раз
+
+  # ----------------------------------------------------------
+  # Handlers — выполняются ОДИН РАЗ в конце play'а,
+  # только если были уведомлены через `notify:`
+  #
+  # Порядок выполнения = порядок объявления, не порядок notify
+  # ----------------------------------------------------------
+  handlers:
+
+    - name: reload systemd daemon
+      systemd:
+        daemon_reload: true
+
+    - name: restart etcd
+      systemd:
+        name: etcd
+        state: restarted

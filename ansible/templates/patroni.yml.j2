@@ -1,0 +1,172 @@
+# ============================================================
+# Patroni конфигурация для ноды: {{ inventory_hostname }}
+# Сгенерировано Ansible — не редактировать вручную
+#
+# Структура файла:
+#   scope / name      — идентификация кластера и ноды
+#   restapi           — HTTP API Patroni (healthcheck, управление)
+#   etcd3             — подключение к DCS (distributed config store)
+#   bootstrap         — параметры первого запуска (initdb, pg_hba)
+#   postgresql        — конфигурация самого PostgreSQL
+# ============================================================
+
+# Имя кластера — одинаковое для всех нод.
+# Используется как корневой ключ в etcd: /service/<scope>/
+scope: {{ patroni_cluster_name }}
+
+# Имя этой конкретной ноды внутри кластера
+name: {{ inventory_hostname }}
+
+# ----------------------------------------------------------
+# REST API
+# Patroni предоставляет HTTP API для мониторинга и управления.
+# HAProxy / keepalived проверяют /health чтобы понять кто primary.
+# ----------------------------------------------------------
+restapi:
+  # Слушаем на всех интерфейсах
+  listen: 0.0.0.0:{{ patroni_api_port }}
+  # Адрес, по которому другие ноды и балансировщики видят этот API
+  connect_address: {{ patroni_node_ip }}:{{ patroni_api_port }}
+
+# ----------------------------------------------------------
+# DCS: etcd v3 API
+#
+# Почему etcd3, а не etcd?
+#   etcd 3.5+ отключил v2 API по умолчанию.
+#   Секция `etcd3:` использует gRPC/v3 API через библиотеку etcd3.
+# ----------------------------------------------------------
+etcd3:
+  # Список всех etcd endpoint'ов через запятую.
+  # Patroni сам переключится на живой если один упадёт.
+  hosts: >-
+    {% for node in etcd_nodes -%}
+    {{ node.ip }}:{{ node.client_port }}
+    {%- if not loop.last %},{% endif %}
+    {%- endfor %}
+
+# ----------------------------------------------------------
+# Bootstrap — выполняется ОДИН РАЗ на primary при initdb.
+# Остальные ноды игнорируют этот раздел и клонируют primary.
+# ----------------------------------------------------------
+bootstrap:
+
+  # Параметры кластера, которые Patroni хранит в etcd.
+  # Применяются ко всем нодам (включая будущие реплики).
+  dcs:
+    # Время жизни лидерского ключа в etcd (секунды).
+    # Если primary не обновляет ключ дольше ttl — запускается failover.
+    ttl: {{ patroni_ttl }}
+
+    # Интервал главного цикла Patroni (секунды).
+    # Каждые loop_wait секунд Patroni проверяет состояние кластера.
+    loop_wait: {{ patroni_loop_wait }}
+
+    # Таймаут на операции с etcd.
+    # Должен быть >= loop_wait.
+    retry_timeout: {{ patroni_retry_timeout }}
+
+    # Максимальное отставание реплики при failover (байты).
+    # Если реплика отстала больше — она не получит роль primary.
+    # 1048576 = 1MB
+    maximum_lag_on_failover: {{ patroni_maximum_lag_on_failover }}
+
+    postgresql:
+      # pg_rewind позволяет вернуть старый primary как реплику
+      # после failover без полного pg_basebackup.
+      use_pg_rewind: true
+
+      # Replication slots гарантируют что WAL не удалится
+      # пока реплика не применила его.
+      use_slots: true
+
+      # Параметры PostgreSQL (применяются через patronictl edit-config)
+      parameters:
+        # Уровень WAL: replica = достаточно для streaming replication
+        wal_level: {{ postgresql_wal_level }}
+        # Разрешить чтение с hot standby реплики
+        hot_standby: "{{ postgresql_hot_standby }}"
+        max_connections: {{ postgresql_max_connections }}
+        # Количество WAL sender процессов (для реплик)
+        max_wal_senders: {{ postgresql_max_wal_senders }}
+        max_replication_slots: {{ postgresql_max_replication_slots }}
+        # Нужно для pg_rewind
+        wal_log_hints: "{{ postgresql_wal_log_hints }}"
+        shared_buffers: {{ postgresql_shared_buffers }}
+
+  # Опции для pg_ctl initdb при создании нового кластера
+  initdb:
+    - encoding: UTF8
+    - data-checksums    # включает checksums для обнаружения повреждений
+
+  # pg_hba.conf — правила аутентификации PostgreSQL
+  pg_hba:
+    # Репликация между нодами (pg1 ↔ pg2)
+    - host replication {{ patroni_replication_user }} {{ cluster_subnet }} md5
+    # Доступ приложений
+    - host all all 0.0.0.0/0 md5
+    # Локальный доступ (для patronictl, healthcheck)
+    - local all all trust
+
+  # Пользователи, создаваемые при bootstrap
+  users:
+    {{ patroni_replication_user }}:
+      password: {{ patroni_replication_password }}
+      options:
+        - replication
+
+# ----------------------------------------------------------
+# PostgreSQL конфигурация для этой конкретной ноды
+# ----------------------------------------------------------
+postgresql:
+  # На каком адресе слушает PostgreSQL
+  listen: 0.0.0.0:{{ postgresql_port }}
+
+  # Адрес, который Patroni передаёт в etcd для подключения других нод.
+  # Важно: это должен быть реальный IP, не 0.0.0.0!
+  connect_address: {{ patroni_node_ip }}:{{ postgresql_port }}
+
+  # Директория с данными PostgreSQL.
+  # Должна быть ПУСТОЙ при первом старте (Patroni сам сделает initdb).
+  data_dir: {{ postgresql_data_dir }}
+
+  # Путь к бинарникам PostgreSQL
+  bin_dir: /usr/lib/postgresql/{{ postgresql_version }}/bin
+
+  # Файл для хранения паролей (используется pg_rewind, pg_basebackup)
+  pgpass: /tmp/.pgpass_{{ inventory_hostname }}
+
+  # Аутентификация
+  authentication:
+    # Пользователь для репликации (streaming replication, pg_basebackup)
+    replication:
+      username: {{ patroni_replication_user }}
+      password: {{ patroni_replication_password }}
+    # Суперпользователь PostgreSQL
+    superuser:
+      username: {{ patroni_superuser }}
+      password: {{ patroni_superuser_password }}
+    # Пользователь для Patroni (rewind, управление)
+    rewind:
+      username: {{ patroni_superuser }}
+      password: {{ patroni_superuser_password }}
+
+# ----------------------------------------------------------
+# Watchdog — аппаратная защита от split-brain
+# В production использовать softdog или аппаратный watchdog.
+# Для обучения отключаем.
+# ----------------------------------------------------------
+watchdog:
+  mode: off
+
+# ----------------------------------------------------------
+# Теги — метаданные ноды для маршрутизации запросов
+# ----------------------------------------------------------
+tags:
+  # true = нода никогда не станет primary при failover
+  nofailover: false
+  # true = нода не участвует в балансировке нагрузки
+  noloadbalance: false
+  # true = другие ноды не будут клонировать с этой
+  clonefrom: false
+  # true = нода не используется как синхронная реплика
+  nosync: false

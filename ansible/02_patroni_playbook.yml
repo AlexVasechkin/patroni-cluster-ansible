@@ -1,0 +1,424 @@
+---
+# ============================================================
+# Playbook 02: Установка PostgreSQL + Patroni
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini 02_patroni_playbook.yml
+#
+# Структура playbook'а (3 play):
+#
+#   PLAY 1 [postgres] — Установка и конфигурация (параллельно на обоих нодах)
+#     Устанавливаем PostgreSQL 16, Patroni, создаём конфиги.
+#     Patroni ещё НЕ запускаем.
+#
+#   PLAY 2 [pg1] — Запуск primary
+#     Запускаем Patroni на pg1. Он делает initdb и становится primary.
+#     Ждём пока он получит роль leader в etcd.
+#
+#   PLAY 3 [pg2] — Подключение реплики
+#     Запускаем Patroni на pg2. Он видит в etcd что pg1 — лидер,
+#     делает pg_basebackup с pg1 и поднимается как replica.
+#
+# Почему такой порядок?
+#   Если запустить обе ноды одновременно, обе начнут конкурировать
+#   за роль primary. Выигрывает та, что быстрее записала ключ в etcd.
+#   Для детерминированного обучения — явно запускаем pg1 первой.
+# ============================================================
+
+
+# ==============================================================
+# PLAY 1: Установка зависимостей и конфигурация (обе ноды)
+# ==============================================================
+- name: "PLAY 1 | Установка PostgreSQL и Patroni"
+  hosts: postgres
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+
+    - name: "PRE | Обновляем кэш apt"
+      apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: "PRE | Информация о ноде"
+      debug:
+        msg:
+          - "Хост: {{ inventory_hostname }}"
+          - "IP в кластере: {{ patroni_node_ip }}"
+          - "PostgreSQL версия: {{ postgresql_version }}"
+          - "Кластер: {{ patroni_cluster_name }}"
+
+  tasks:
+
+    # ==========================================================
+    # БЛОК 1: Установка PostgreSQL из официального репозитория
+    #
+    # Почему не apt install postgresql?
+    #   Дефолтный пакет Ubuntu содержит старую версию.
+    #   Официальный репозиторий postgresql.org всегда содержит
+    #   актуальные версии (в нашем случае — PG 16).
+    # ==========================================================
+
+    - name: "1.1 | Устанавливаем пакеты для добавления репозитория"
+      apt:
+        name:
+          - curl
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: "1.2 | Создаём директорию для GPG ключей"
+      file:
+        path: /usr/share/postgresql-common/pgdg
+        state: directory
+        mode: "0755"
+
+    - name: "1.3 | Скачиваем GPG ключ PostgreSQL"
+      get_url:
+        url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+        dest: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+        mode: "0644"
+
+    - name: "1.4 | Добавляем официальный PostgreSQL apt репозиторий"
+      apt_repository:
+        repo: >-
+          deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc]
+          https://apt.postgresql.org/pub/repos/apt
+          {{ ansible_distribution_release }}-pgdg main
+        state: present
+        filename: pgdg
+        update_cache: true
+
+    - name: "1.5 | Устанавливаем PostgreSQL {{ postgresql_version }}"
+      apt:
+        name:
+          - "postgresql-{{ postgresql_version }}"
+          - "postgresql-client-{{ postgresql_version }}"
+          - "postgresql-server-dev-{{ postgresql_version }}"
+        state: present
+
+    # ==========================================================
+    # БЛОК 2: Подготовка PostgreSQL для управления через Patroni
+    #
+    # apt при установке автоматически инициализирует кластер PG
+    # в /var/lib/postgresql/16/main и запускает сервис.
+    # Patroni будет сам управлять жизненным циклом PG,
+    # поэтому нам нужно:
+    #   1. Остановить сервис postgresql
+    #   2. Отключить автозапуск postgresql (Patroni запустит его сам)
+    #   3. Удалить директорию данных (Patroni сделает initdb с нуля)
+    # ==========================================================
+
+    - name: "2.1 | Останавливаем и отключаем postgresql.service"
+      systemd:
+        name: "postgresql@{{ postgresql_version }}-main"
+        state: stopped
+        enabled: false
+      # Игнорируем ошибку если сервис не существует / не запущен
+      failed_when: false
+
+    - name: "2.2 | Также останавливаем общий postgresql.service"
+      systemd:
+        name: postgresql
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: "2.3 | Проверяем, инициализировал ли уже Patroni data_dir"
+      stat:
+        path: "{{ postgresql_data_dir }}/PG_VERSION"
+      register: pg_version_file
+
+    - name: "2.4 | Удаляем дефолтный data_dir (только если Patroni ещё не инициализировал)"
+      file:
+        path: "{{ postgresql_data_dir }}"
+        state: absent
+      # Удаляем ТОЛЬКО при первом запуске: если PG_VERSION нет — Patroni ещё не делал initdb.
+      # При повторном запуске пропускаем — не ломаем живые данные.
+      when: not pg_version_file.stat.exists
+
+    - name: "2.5 | Создаём чистую директорию для данных Patroni"
+      file:
+        path: "{{ postgresql_data_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0700"    # Только postgres может читать — требование PG
+      when: not pg_version_file.stat.exists
+
+    - name: "2.6 | Создаём директорию для логов Patroni"
+      file:
+        path: "{{ patroni_log_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0755"
+
+    - name: "2.7 | Создаём директорию для конфига Patroni"
+      file:
+        path: "{{ patroni_config_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0755"
+      # Эта директория нужна всегда — создаём безусловно
+
+    # ==========================================================
+    # БЛОК 3: Установка Patroni
+    #
+    # Patroni устанавливаем через pip (не через apt),
+    # т.к. apt-версия часто устаревшая.
+    #
+    # patroni[etcd3] — устанавливает Patroni + клиент для etcd v3 API.
+    # psycopg2-binary — Python-драйвер для PostgreSQL (нужен Patroni).
+    #
+    # --break-system-packages — обход защиты Ubuntu 24.04,
+    # которая запрещает pip устанавливать пакеты системно.
+    # В production используйте virtualenv.
+    # ==========================================================
+
+    - name: "3.1 | Устанавливаем pip и вспомогательные пакеты"
+      apt:
+        name:
+          - python3-pip
+          - python3-dev
+          - python3-venv
+          - libpq-dev    # нужен для компиляции psycopg2
+          - gcc
+          # acl нужен Ansible для become_user на непривилегированного пользователя
+          # (setfacl выставляет права на tmp-файлы при переключении пользователя)
+          - acl
+        state: present
+
+    - name: "3.2 | Устанавливаем Patroni с поддержкой etcd3"
+      pip:
+        name:
+          - "patroni[etcd3]"
+          - "psycopg2-binary"
+        executable: pip3
+        extra_args: "--break-system-packages"
+      # Проверяем результат
+      register: patroni_install
+
+    - name: "3.3 | Проверяем версию установленного Patroni"
+      command: patroni --version
+      register: patroni_version_check
+      changed_when: false
+
+    - name: "3.3 | Версия Patroni"
+      debug:
+        msg: "{{ patroni_version_check.stdout }}"
+
+    # ==========================================================
+    # БЛОК 4: Конфигурация Patroni
+    # ==========================================================
+
+    - name: "4.1 | Генерируем patroni.yml для {{ inventory_hostname }}"
+      template:
+        src: patroni.yml.j2
+        dest: "{{ patroni_config_dir }}/patroni.yml"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+
+    - name: "4.2 | Показываем сгенерированный конфиг"
+      slurp:
+        src: "{{ patroni_config_dir }}/patroni.yml"
+      register: patroni_config_content
+
+    - name: "4.2 | Конфиг Patroni на {{ inventory_hostname }}"
+      debug:
+        msg: "{{ patroni_config_content.content | b64decode }}"
+
+    - name: "4.3 | Создаём systemd unit для Patroni"
+      template:
+        src: patroni.service.j2
+        dest: /etc/systemd/system/patroni.service
+        owner: root
+        group: root
+        mode: "0644"
+      notify: reload systemd daemon
+
+    - name: "4.4 | Перезагружаем systemd daemon"
+      systemd:
+        daemon_reload: true
+
+  handlers:
+    - name: reload systemd daemon
+      systemd:
+        daemon_reload: true
+
+
+# ==============================================================
+# PLAY 2: Запуск primary (только pg1)
+#
+# pg1 запускается первым → делает initdb → записывает себя
+# лидером в etcd → становится primary.
+# ==============================================================
+- name: "PLAY 2 | Запуск Patroni на primary (pg1)"
+  hosts: pg1
+  become: true
+
+  tasks:
+
+    - name: "5.1 | Запускаем Patroni на pg1 (будущий primary)"
+      systemd:
+        name: patroni
+        state: started
+        enabled: true
+
+    - name: "5.2 | Ждём пока Patroni поднимет PostgreSQL (порт 5432)"
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ postgresql_port }}"
+        timeout: 120
+        state: started
+        delay: 5
+
+    - name: "5.3 | Ждём пока Patroni REST API станет доступен (порт 8008)"
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ patroni_api_port }}"
+        timeout: 60
+        state: started
+
+    - name: "5.4 | Проверяем роль pg1 через REST API"
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/leader"
+        method: GET
+        status_code: 200
+      register: pg1_leader_check
+      retries: 12
+      delay: 5
+      until: pg1_leader_check.status == 200
+      # /leader возвращает 200 только если нода является лидером
+
+    - name: "5.5 | pg1 успешно стал primary!"
+      debug:
+        msg:
+          - "pg1 ({{ patroni_node_ip }}) является ЛИДЕРОМ кластера"
+          - "PostgreSQL принимает запросы на порту {{ postgresql_port }}"
+          - "Patroni API: http://{{ patroni_node_ip }}:{{ patroni_api_port }}"
+
+    - name: "5.6 | Показываем состояние кластера из etcd"
+      command: >
+        patronictl
+        -c {{ patroni_config_dir }}/patroni.yml
+        list
+      become_user: postgres
+      register: patronictl_list
+      changed_when: false
+
+    - name: "5.6 | Состояние кластера (только primary пока)"
+      debug:
+        msg: "{{ patronictl_list.stdout_lines }}"
+
+
+# ==============================================================
+# PLAY 3: Подключение реплики (только pg2)
+#
+# pg2 видит в etcd что pg1 — лидер → выполняет pg_basebackup
+# с pg1 → поднимается в режиме hot standby.
+# ==============================================================
+- name: "PLAY 3 | Подключение реплики (pg2)"
+  hosts: pg2
+  become: true
+
+  tasks:
+
+    - name: "6.1 | Запускаем Patroni на pg2 (реплика)"
+      systemd:
+        name: patroni
+        state: started
+        enabled: true
+
+    - name: "6.2 | Ждём завершения pg_basebackup (клонирование с primary)"
+      # pg_basebackup копирует все данные с primary — может занять время
+      wait_for:
+        host: "127.0.0.1"
+        port: "{{ postgresql_port }}"
+        timeout: 300    # 5 минут — достаточно для небольшой базы
+        state: started
+        delay: 10
+
+    - name: "6.3 | Проверяем что pg2 стал репликой"
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/replica"
+        method: GET
+        status_code: 200
+      register: pg2_replica_check
+      retries: 18
+      delay: 10
+      until: pg2_replica_check.status == 200
+
+    - name: "6.4 | pg2 успешно подключился как replica!"
+      debug:
+        msg:
+          - "pg2 ({{ patroni_node_ip }}) является РЕПЛИКОЙ"
+          - "Streaming replication с pg1 ({{ hostvars['pg1']['patroni_node_ip'] }}) активна"
+
+    # Финальный вывод — показываем полный кластер
+    - name: "6.5 | Финальный статус кластера"
+      command: >
+        patronictl
+        -c {{ patroni_config_dir }}/patroni.yml
+        list
+      become_user: postgres
+      register: patronictl_final
+      changed_when: false
+
+    - name: "6.5 | Кластер Patroni — итоговое состояние"
+      debug:
+        msg: "{{ patronictl_final.stdout_lines }}"
+
+    # ==========================================================
+    # Финальная функциональная проверка
+    # Пишем запись на primary, читаем с реплики
+    # ==========================================================
+    - name: "6.6 | Функциональный тест: пишем на primary, читаем с реплики"
+      block:
+
+        - name: "Создаём тестовую таблицу и запись на primary (pg1)"
+          command: >
+            psql
+            -h {{ hostvars['pg1']['patroni_node_ip'] }}
+            -U {{ patroni_superuser }}
+            -c "CREATE TABLE IF NOT EXISTS patroni_test (msg TEXT);
+                INSERT INTO patroni_test VALUES ('hello from primary pg1');"
+          become_user: postgres
+          environment:
+            PGPASSWORD: "{{ patroni_superuser_password }}"
+          changed_when: false
+
+        - name: "Читаем данные с реплики (pg2) — проверяем streaming replication"
+          command: >
+            psql
+            -h {{ patroni_node_ip }}
+            -U {{ patroni_superuser }}
+            -c "SELECT * FROM patroni_test;"
+          become_user: postgres
+          environment:
+            PGPASSWORD: "{{ patroni_superuser_password }}"
+          register: read_from_replica
+          changed_when: false
+          # Даём время на применение WAL на реплике
+          retries: 5
+          delay: 2
+          until: read_from_replica.rc == 0
+
+        - name: "Результат чтения с реплики"
+          debug:
+            msg: "{{ read_from_replica.stdout_lines }}"
+
+        - name: "Удаляем тестовую таблицу"
+          command: >
+            psql
+            -h {{ hostvars['pg1']['patroni_node_ip'] }}
+            -U {{ patroni_superuser }}
+            -c "DROP TABLE IF EXISTS patroni_test;"
+          become_user: postgres
+          environment:
+            PGPASSWORD: "{{ patroni_superuser_password }}"
+          changed_when: false

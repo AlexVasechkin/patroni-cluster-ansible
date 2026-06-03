@@ -1,0 +1,51 @@
+# ============================================================
+# Systemd unit для Patroni
+# Сгенерировано Ansible — не редактировать вручную
+# ============================================================
+[Unit]
+Description=Patroni — HA решение для PostgreSQL
+Documentation=https://patroni.readthedocs.io/
+# Стартуем после сети и времени (нужно для etcd TLS и временных меток)
+After=network-online.target
+Wants=network-online.target
+# Patroni не зависит от postgresql.service — он сам управляет процессом PG
+
+[Service]
+Type=simple
+
+# Запускаем от имени postgres — у него уже есть права на data_dir
+User=postgres
+Group=postgres
+
+# Patroni установлен через pip в home postgres
+# Используем полный путь к бинарнику
+ExecStart=/usr/local/bin/patroni {{ patroni_config_dir }}/patroni.yml
+
+# Patroni сам перезапускает PostgreSQL при сбое,
+# поэтому мы перезапускаем только сам процесс patroni
+Restart=on-failure
+RestartSec=10s
+
+# Логи Patroni идут в journald (смотреть: journalctl -u patroni -f)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=patroni
+
+# Переменные окружения
+Environment=PATRONI_LOGLEVEL=INFO
+# Отключаем цветной вывод в journald
+Environment=TERM=dumb
+
+# Достаточно времени для pg_basebackup при инициализации реплики
+# (клонирование большой базы может занять время)
+TimeoutStartSec=300
+
+# Корректная остановка: Patroni сначала gracefully останавливает PG
+TimeoutStopSec=60
+KillMode=process
+
+# Снимаем лимит на открытые файлы (PG держит много соединений)
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
