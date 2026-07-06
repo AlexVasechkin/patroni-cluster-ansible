@@ -10,7 +10,7 @@ patroni_log_dir: "/var/log/patroni"
 
 # Порты
 postgresql_port: 5432
-patroni_api_port: 8008
+# patroni_api_port перенесён в all.yml (нужен pgbouncer-скрипту)
 
 # Параметры PostgreSQL (можно переопределить для конкретного хоста)
 postgresql_max_connections: 100

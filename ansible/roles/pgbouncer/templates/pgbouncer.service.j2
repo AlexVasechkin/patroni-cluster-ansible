@@ -1,0 +1,39 @@
+# ============================================================
+# systemd unit для PgBouncer
+# Сгенерировано Ansible — не редактировать вручную
+#
+# Переопределяем дефолтный /lib/systemd/system/pgbouncer.service,
+# чтобы контролировать директиву ExecStart и параметры безопасности.
+# ============================================================
+[Unit]
+Description=PgBouncer — лёгкий connection pooler для PostgreSQL
+Documentation=https://www.pgbouncer.org/
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# simple: процесс не форкается, systemd отслеживает его напрямую.
+# Это современный подход — не требует PID файла и прав root на него.
+Type=simple
+
+User={{ pgbouncer_user }}
+Group={{ pgbouncer_group }}
+
+# Запускаем без -d (без демонизации) — systemd сам удерживает процесс.
+# -q — подавляем вывод в stdout (всё идёт в journald через StandardOutput)
+ExecStart=/usr/sbin/pgbouncer -q {{ pgbouncer_config_dir }}/pgbouncer.ini
+
+# RELOAD — посылает HUP, PgBouncer перечитывает конфиг.
+# Текущие соединения НЕ рвутся — клиенты не замечают перезагрузки.
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=5s
+
+# Достаточно времени для graceful shutdown (дожидается конца транзакций)
+TimeoutStopSec=30
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+---
+# ============================================================
+# Роль pgbouncer — точка входа
+# Задачи разбиты по файлам для читаемости
+# ============================================================
+
+- name: "Установка PgBouncer"
+  import_tasks: install.yml
+  tags: [pgbouncer, install]
+
+- name: "Конфигурация PgBouncer"
+  import_tasks: configure.yml
+  tags: [pgbouncer, configure]
+
+- name: "Запуск и проверка PgBouncer"
+  import_tasks: service.yml
+  tags: [pgbouncer, service]
+
+- name: "Функциональная проверка"
+  import_tasks: verify.yml
+  tags: [pgbouncer, verify]

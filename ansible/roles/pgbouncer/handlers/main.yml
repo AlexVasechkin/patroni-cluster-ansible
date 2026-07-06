@@ -1,0 +1,25 @@
+---
+# ============================================================
+# Handlers для роли pgbouncer
+#
+# reload vs restart:
+#   reload  — PgBouncer перечитывает конфиг БЕЗ разрыва текущих
+#             соединений. Используем при изменении pgbouncer.ini.
+#   restart — полная перезагрузка процесса. Нужна только при
+#             изменении системного юнита (pgbouncer.service).
+# ============================================================
+
+- name: reload systemd daemon
+  systemd:
+    daemon_reload: true
+
+- name: reload pgbouncer
+  # RELOAD не рвёт клиентские соединения — предпочтительно
+  systemd:
+    name: pgbouncer
+    state: reloaded
+
+- name: restart pgbouncer
+  systemd:
+    name: pgbouncer
+    state: restarted

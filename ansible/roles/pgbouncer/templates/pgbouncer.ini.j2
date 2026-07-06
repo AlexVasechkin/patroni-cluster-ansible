@@ -1,0 +1,141 @@
+; ============================================================
+; pgbouncer.ini для хоста {{ inventory_hostname }}
+; Сгенерировано Ansible — не редактировать вручную
+;
+; Документация: https://www.pgbouncer.org/config.html
+; ============================================================
+
+; ----------------------------------------------------------
+; [databases] — маршрутизация подключений
+;
+; Формат: <алиас> = host=<pg-host> port=<pg-port> dbname=<pg-db>
+;
+; Клиент подключается к PgBouncer:
+;   psql -h pgbouncer1 -p 6432 -d postgres
+;         ↓
+;   PgBouncer смотрит имя базы → находит строку ниже → подключается к PG
+;         ↓
+;   PostgreSQL primary ({{ pgbouncer_primary_host }}:{{ pgbouncer_primary_port }})
+;
+; При failover Patroni меняет лидера. Скрипт /usr/local/bin/pgbouncer-update-primary.sh
+; обновляет host= и перезагружает PgBouncer (RELOAD не рвёт соединения).
+; ----------------------------------------------------------
+[databases]
+{% for db in pgbouncer_databases %}
+{% if db.dbname %}
+{{ db.name }} = host={{ pgbouncer_primary_host }} port={{ pgbouncer_primary_port }} dbname={{ db.dbname }}
+{% else %}
+{{ db.name }} = host={{ pgbouncer_primary_host }} port={{ pgbouncer_primary_port }}
+{% endif %}
+{% endfor %}
+
+; ----------------------------------------------------------
+; [pgbouncer] — основные настройки
+; ----------------------------------------------------------
+[pgbouncer]
+
+; Адрес и порт для клиентских подключений
+listen_addr = {{ pgbouncer_listen_addr }}
+listen_port = {{ pgbouncer_listen_port }}
+
+; ----------------------------------------------------------
+; Аутентификация
+;
+; auth_type = md5:
+;   PgBouncer проверяет пароль клиента по userlist.txt.
+;   Затем использует хранимый пароль для подключения к PG.
+;
+; auth_query (альтернатива userlist.txt в production):
+;   PgBouncer делает запрос к PG для получения пароля на лету:
+;   auth_query = SELECT usename, passwd FROM pg_shadow WHERE usename=$1
+;   Это удобнее — не нужно синхронизировать userlist.txt при смене паролей.
+; ----------------------------------------------------------
+auth_type = {{ pgbouncer_auth_type }}
+auth_file = {{ pgbouncer_auth_file }}
+
+; ----------------------------------------------------------
+; Pool mode
+;
+; transaction (рекомендуется для большинства приложений):
+;   Серверное соединение захватывается только на время транзакции.
+;   После COMMIT/ROLLBACK — возвращается в пул.
+;   ⚠ Несовместимо с: SET, LISTEN, advisory locks, WITH HOLD cursors.
+;
+; session (дефолт, максимальная совместимость):
+;   Серверное соединение держится до отключения клиента.
+;   Пул помогает меньше — только при полном отключении.
+;
+; statement (редко используется):
+;   Соединение освобождается после каждого запроса.
+;   Запрещает любые многошаговые операции.
+; ----------------------------------------------------------
+pool_mode = {{ pgbouncer_pool_mode }}
+
+; ----------------------------------------------------------
+; Размеры пула
+; ----------------------------------------------------------
+
+; Максимум клиентских подключений ко ВСЕМУ PgBouncer
+max_client_conn = {{ pgbouncer_max_client_conn }}
+
+; Соединений с PG на пару (database, user).
+; Итого серверных соединений: default_pool_size × (число db × число users)
+default_pool_size = {{ pgbouncer_default_pool_size }}
+
+; Минимальный пул «прогретых» соединений — всегда готовы к запросу
+min_pool_size = {{ pgbouncer_min_pool_size }}
+
+; Резервные соединения поверх default_pool_size для пиков нагрузки
+reserve_pool_size = {{ pgbouncer_reserve_pool_size }}
+
+; Секунд ждать резервного соединения до возврата ошибки клиенту
+reserve_pool_timeout = {{ pgbouncer_reserve_pool_timeout }}
+
+; ----------------------------------------------------------
+; Таймауты (секунды)
+; ----------------------------------------------------------
+
+; Закрыть простаивающее серверное соединение
+server_idle_timeout = {{ pgbouncer_server_idle_timeout }}
+
+; Закрыть простаивающее клиентское соединение (0 = отключено)
+client_idle_timeout = {{ pgbouncer_client_idle_timeout }}
+
+; Таймаут установки соединения с PG
+server_connect_timeout = {{ pgbouncer_server_connect_timeout }}
+
+; ----------------------------------------------------------
+; Управление и мониторинг
+;
+; PgBouncer предоставляет виртуальную базу "pgbouncer":
+;   psql -h host -p 6432 -U postgres -d pgbouncer
+;   SHOW POOLS;    — состояние пулов
+;   SHOW SERVERS;  — соединения с PG
+;   SHOW CLIENTS;  — клиентские соединения
+;   SHOW STATS;    — статистика запросов
+;   RELOAD;        — перечитать конфиг без разрыва соединений
+;   PAUSE db;      — приостановить трафик (для обслуживания)
+;   RESUME db;     — возобновить
+; ----------------------------------------------------------
+admin_users = {{ pgbouncer_admin_users | join(',') }}
+stats_users = {{ pgbouncer_stats_users | join(',') }}
+
+; ----------------------------------------------------------
+; Логирование
+; ----------------------------------------------------------
+log_connections = {{ pgbouncer_log_connections }}
+log_disconnections = {{ pgbouncer_log_disconnections }}
+log_pooler_errors = {{ pgbouncer_log_pooler_errors }}
+stats_period = {{ pgbouncer_stats_period }}
+
+; ----------------------------------------------------------
+; Прочее
+; ----------------------------------------------------------
+
+; Параметры сессии которые PgBouncer не должен передавать в PG.
+; extra_float_digits часто устанавливается клиентами (JDBC и др.)
+; и вызывает ошибки в transaction mode. Добавляем в ignore-список.
+ignore_startup_parameters = extra_float_digits,geqo,search_path
+
+; PID файл не нужен при Type=simple в systemd
+; pidfile = {{ pgbouncer_pid_file }}

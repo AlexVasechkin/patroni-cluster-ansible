@@ -1,0 +1,121 @@
+---
+# ============================================================
+# Defaults для роли pgbouncer
+#
+# Переменные здесь имеют наименьший приоритет — их можно
+# переопределить в group_vars, host_vars или прямо в playbook.
+# ============================================================
+
+# ----------------------------------------------------------
+# Сеть и порты
+# ----------------------------------------------------------
+
+# Адрес и порт, на которых PgBouncer принимает клиентов
+pgbouncer_listen_addr: "0.0.0.0"
+pgbouncer_listen_port: 6432
+
+# ----------------------------------------------------------
+# Бэкенд — куда PgBouncer отправляет запросы
+#
+# В Patroni-кластере это всегда текущий primary.
+# При failover переменную нужно обновить и перезагрузить PgBouncer.
+# В production для автоматики используют HAProxy или keepalived VIP.
+# ----------------------------------------------------------
+pgbouncer_primary_host: "172.20.0.21"
+pgbouncer_primary_port: 5432
+
+# Список баз данных для проксирования.
+# Формат: { name: "имя_в_pgbouncer", dbname: "реальное_имя_в_PG" }
+# name="*" — wildcard: любое имя базы проксируется на бэкенд.
+pgbouncer_databases:
+  - name: "postgres"
+    dbname: "postgres"
+  - name: "*"
+    dbname: ""       # пустое = использовать имя из запроса клиента
+
+# ----------------------------------------------------------
+# Pool settings
+#
+# pool_mode определяет когда соединение с PG возвращается в пул:
+#   session     — при отключении клиента (совместимо со всем)
+#   transaction — после каждой транзакции (рекомендуется для web)
+#   statement   — после каждого запроса (запрещает multi-statement)
+# ----------------------------------------------------------
+pgbouncer_pool_mode: "transaction"
+
+# Максимум одновременных клиентских подключений к PgBouncer
+pgbouncer_max_client_conn: 200
+
+# Соединений с PG на пару (database, user)
+pgbouncer_default_pool_size: 20
+
+# Минимум «прогретых» соединений в пуле
+pgbouncer_min_pool_size: 5
+
+# Резервные соединения для быстрого ответа при пике нагрузки
+pgbouncer_reserve_pool_size: 5
+
+# Сколько секунд ждать резервного соединения до ошибки клиенту
+pgbouncer_reserve_pool_timeout: 3
+
+# ----------------------------------------------------------
+# Таймауты
+# ----------------------------------------------------------
+
+# Закрыть серверное соединение если оно простаивало N секунд
+pgbouncer_server_idle_timeout: 600
+
+# Закрыть клиентское соединение если простаивало N секунд (0 = off)
+pgbouncer_client_idle_timeout: 0
+
+# Таймаут на подключение к серверу PostgreSQL
+pgbouncer_server_connect_timeout: 15
+
+# ----------------------------------------------------------
+# Аутентификация
+#
+# auth_type:
+#   md5      — MD5-хэш пароля (совместимо с PG md5 pg_hba)
+#   scram-sha-256 — современный метод (требует PgBouncer 1.14+)
+#   trust    — без пароля (только для разработки!)
+# ----------------------------------------------------------
+# scram-sha-256: современный и безопасный метод (PG14+, PgBouncer 1.18+).
+# При этом userlist.txt хранит plaintext пароль — PgBouncer вычисляет scram сам.
+# md5 не работает с PG16 (пароли хранятся как scram-sha-256 по умолчанию).
+pgbouncer_auth_type: "scram-sha-256"
+
+# Путь к файлу с пользователями и хэшами паролей
+pgbouncer_auth_file: "/etc/pgbouncer/userlist.txt"
+
+# Список пользователей, которым разрешён доступ
+# Пароли хранятся как MD5-хэш: md5(password + username)
+pgbouncer_users:
+  - username: "{{ patroni_superuser }}"
+    password: "{{ patroni_superuser_password }}"
+
+# Пользователи с доступом к pgbouncer admin console (SHOW POOLS, etc.)
+pgbouncer_admin_users:
+  - "{{ patroni_superuser }}"
+
+# Пользователи с доступом к статистике (SHOW STATS, SHOW CLIENTS)
+pgbouncer_stats_users:
+  - "{{ patroni_superuser }}"
+
+# ----------------------------------------------------------
+# Логирование
+# ----------------------------------------------------------
+pgbouncer_log_connections: 1
+pgbouncer_log_disconnections: 1
+pgbouncer_log_pooler_errors: 1
+pgbouncer_stats_period: 60
+
+# ----------------------------------------------------------
+# Пути
+# ----------------------------------------------------------
+pgbouncer_config_dir: "/etc/pgbouncer"
+pgbouncer_log_dir: "/var/log/pgbouncer"
+pgbouncer_pid_file: "/run/pgbouncer/pgbouncer.pid"
+
+# Системный пользователь (создаётся при установке пакета pgbouncer)
+pgbouncer_user: "pgbouncer"
+pgbouncer_group: "pgbouncer"

@@ -1,0 +1,76 @@
+---
+# ============================================================
+# install.yml — установка пакета PgBouncer
+#
+# Ставим из официального репозитория postgresql.org (pgdg),
+# а не из дефолтного Ubuntu — там версия сильно устаревшая.
+# ============================================================
+
+- name: "Обновляем кэш apt"
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "Устанавливаем зависимости для добавления репозитория"
+  apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - acl        # нужен Ansible для become_user
+      - postgresql-client-{{ postgresql_version }}  # psql для проверок
+    state: present
+
+- name: "Создаём директорию для GPG ключей"
+  file:
+    path: /usr/share/postgresql-common/pgdg
+    state: directory
+    mode: "0755"
+
+- name: "Скачиваем GPG ключ PostgreSQL (pgdg)"
+  get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    mode: "0644"
+
+- name: "Добавляем pgdg репозиторий"
+  apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc]
+      https://apt.postgresql.org/pub/repos/apt
+      {{ ansible_distribution_release }}-pgdg main
+    state: present
+    filename: pgdg
+    update_cache: true
+
+- name: "Устанавливаем pgbouncer из pgdg"
+  apt:
+    name: pgbouncer
+    state: present
+
+- name: "Проверяем версию PgBouncer"
+  command: pgbouncer --version
+  register: pgbouncer_ver
+  changed_when: false
+
+- name: "Версия PgBouncer"
+  debug:
+    msg: "{{ pgbouncer_ver.stdout }}"
+
+# Пакет pgbouncer из pgdg не всегда создаёт системного пользователя.
+# Создаём явно — это идемпотентная операция (state: present).
+- name: "Создаём системную группу pgbouncer"
+  group:
+    name: "{{ pgbouncer_group }}"
+    system: true
+    state: present
+
+- name: "Создаём системного пользователя pgbouncer"
+  user:
+    name: "{{ pgbouncer_user }}"
+    group: "{{ pgbouncer_group }}"
+    shell: /sbin/nologin
+    system: true
+    home: "{{ pgbouncer_config_dir }}"
+    create_home: false
+    state: present

@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+# ============================================================
+# pgbouncer-update-primary.sh
+# Сгенерировано Ansible — не редактировать вручную
+#
+# Назначение:
+#   Определяет текущего Patroni-лидера через REST API и
+#   обновляет секцию [databases] в pgbouncer.ini, затем
+#   посылает RELOAD (HUP) процессу PgBouncer.
+#
+# Использование:
+#   1. Вручную после ручного failover:
+#      /usr/local/bin/pgbouncer-update-primary.sh
+#
+#   2. Автоматически — через Patroni callback.
+#      Добавьте в /etc/patroni/patroni.yml:
+#        postgresql:
+#          callbacks:
+#            on_role_change: /usr/local/bin/pgbouncer-update-primary.sh
+#      Patroni вызывает скрипт с аргументами:
+#        $1 = role (master|replica|promoted)
+#        $2 = action (start|stop|reload)
+#        $3 = cluster_name
+#
+# Зависимости: curl, python3, systemctl
+# ============================================================
+
+set -euo pipefail
+
+PGBOUNCER_INI="{{ pgbouncer_config_dir }}/pgbouncer.ini"
+LOG_FILE="{{ pgbouncer_log_dir }}/update-primary.log"
+
+# Patroni REST API endpoints всех нод кластера (из all.yml)
+PATRONI_ENDPOINTS=(
+{% for node in patroni_nodes %}
+  "http://{{ node.ip }}:{{ patroni_api_port }}"
+{% endfor %}
+)
+
+log() {
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+# ----------------------------------------------------------
+# Опрашиваем все Patroni ноды, ищем текущего лидера
+# ----------------------------------------------------------
+find_primary() {
+  for endpoint in "${PATRONI_ENDPOINTS[@]}"; do
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+      --connect-timeout 3 "${endpoint}/leader" 2>/dev/null || echo "000")
+
+    if [[ "$http_code" == "200" ]]; then
+      primary_ip=$(curl -s --connect-timeout 3 "${endpoint}/patroni" 2>/dev/null \
+        | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+# connect_address = 'ip:port'
+print(d['postgresql']['connect_address'].split(':')[0])
+" 2>/dev/null || echo "")
+
+      if [[ -n "$primary_ip" ]]; then
+        echo "$primary_ip"
+        return 0
+      fi
+    fi
+  done
+
+  log "ERROR: Не удалось найти Patroni leader"
+  return 1
+}
+
+# ----------------------------------------------------------
+# Обновляем host= во всех строках секции [databases]
+# ----------------------------------------------------------
+update_pgbouncer_config() {
+  local new_primary="$1"
+  local current_primary
+
+  current_primary=$(grep -oP 'host=\K[0-9.]+' "$PGBOUNCER_INI" | head -1 || echo "")
+
+  if [[ "$current_primary" == "$new_primary" ]]; then
+    log "Primary не изменился ($new_primary), reload не нужен"
+    return 0
+  fi
+
+  log "Обновляем primary: $current_primary → $new_primary"
+  sed -i "s/host=[0-9.]*/host=${new_primary}/g" "$PGBOUNCER_INI"
+
+  log "Посылаем RELOAD PgBouncer (соединения не рвутся)"
+  systemctl reload pgbouncer
+
+  log "Готово. Активный primary: $new_primary"
+}
+
+# ----------------------------------------------------------
+# Main
+# ----------------------------------------------------------
+log "=== Запуск. Аргументы: ${*:-none} ==="
+
+PRIMARY_IP=$(find_primary)
+log "Найден primary: $PRIMARY_IP"
+
+update_pgbouncer_config "$PRIMARY_IP"

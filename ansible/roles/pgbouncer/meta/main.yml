@@ -1,0 +1,5 @@
+---
+galaxy_info:
+  role_name: pgbouncer
+  description: Установка и настройка PgBouncer — connection pooler для PostgreSQL
+  min_ansible_version: "2.14"

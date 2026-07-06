@@ -1,0 +1,143 @@
+---
+# ============================================================
+# Playbook 03: Установка и настройка PgBouncer
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini 03_pgbouncer_playbook.yml
+#
+# Только установка (без проверки):
+#   ansible-playbook -i inventory.ini 03_pgbouncer_playbook.yml \
+#     --skip-tags verify
+#
+# Только обновить конфиг и перезагрузить:
+#   ansible-playbook -i inventory.ini 03_pgbouncer_playbook.yml \
+#     --tags configure
+#
+# Что делает этот playbook:
+#   PLAY 1 — предварительная проверка: Patroni-кластер должен быть готов
+#   PLAY 2 — запускает роль pgbouncer на контейнере pgbouncer1
+#
+# Топология после выполнения:
+#
+#   Клиент
+#     │
+#     ▼
+#   PgBouncer (172.20.0.30:6432)   ← connection pooler
+#     │   пул соединений
+#     ▼
+#   PostgreSQL primary (pg1 172.20.0.21:5432)   ← принимает запись
+#     │   streaming replication
+#     ▼
+#   PostgreSQL replica (pg2 172.20.0.22:5432)   ← горячий standby
+# ============================================================
+
+
+# ==============================================================
+# PLAY 1: Предварительная проверка кластера
+#
+# Убеждаемся что Patroni-кластер работает прежде чем
+# настраивать PgBouncer — иначе тест соединения провалится.
+# ==============================================================
+- name: "PLAY 1 | Проверяем готовность Patroni-кластера"
+  hosts: postgres
+  become: false
+  gather_facts: false
+
+  tasks:
+
+    - name: "Проверяем Patroni REST API (запрос с самой ноды)"
+      # uri запускается на managed host — контейнеры в одной Docker-сети
+      # и могут обращаться к 172.20.0.x напрямую
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/health"
+        method: GET
+        status_code: [200, 503]   # 200=primary, 503=replica — оба живые
+      register: patroni_health
+      become: true
+
+    - name: "Статус Patroni на {{ inventory_hostname }}"
+      debug:
+        msg: >-
+          {{ inventory_hostname }} ({{ patroni_node_ip }}):
+          HTTP {{ patroni_health.status }}
+          — {{ 'PRIMARY' if patroni_health.status == 200 else 'REPLICA' }}
+
+    - name: "Определяем текущий primary"
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/leader"
+        method: GET
+        status_code: [200, 503]
+      register: leader_check
+      become: true
+
+    - name: "Текущий primary кластера"
+      debug:
+        msg: "LEADER → {{ inventory_hostname }} ({{ patroni_node_ip }})"
+      when: leader_check.status == 200
+
+
+# ==============================================================
+# PLAY 1.5: Обновление pg_hba на Patroni-нодах
+#
+# Проблема: PG16 по умолчанию хранит пароли как scram-sha-256,
+# но наш bootstrap pg_hba задал метод md5. Они несовместимы —
+# pg_hba=md5 не может верифицировать scram-sha-256 пароль.
+#
+# Решение: меняем pg_hba на scram-sha-256 и перезагружаем PG.
+# pg_hba.conf управляется Patroni-bootstrap, но после bootstrap
+# Patroni не перезаписывает его — безопасно менять напрямую.
+# ==============================================================
+- name: "PLAY 1.5 | Обновляем pg_hba: md5 → scram-sha-256"
+  hosts: postgres
+  become: true
+
+  tasks:
+
+    - name: "Заменяем md5 на scram-sha-256 в pg_hba.conf (host all)"
+      replace:
+        path: "{{ postgresql_data_dir }}/pg_hba.conf"
+        regexp: '^(host\s+all\s+all\s+\S+)\s+md5$'
+        replace: '\1 scram-sha-256'
+      register: pg_hba_changed
+      notify: reload postgresql config
+
+    - name: "Заменяем md5 на scram-sha-256 в pg_hba.conf (host replication)"
+      replace:
+        path: "{{ postgresql_data_dir }}/pg_hba.conf"
+        regexp: '^(host\s+replication\s+\S+\s+\S+)\s+md5$'
+        replace: '\1 scram-sha-256'
+      notify: reload postgresql config
+
+    - name: "Показываем обновлённый pg_hba.conf"
+      command: "grep -E '^host' {{ postgresql_data_dir }}/pg_hba.conf"
+      register: pg_hba_content
+      changed_when: false
+
+    - name: "Содержимое pg_hba (host-строки)"
+      debug:
+        msg: "{{ pg_hba_content.stdout_lines }}"
+
+  handlers:
+    - name: reload postgresql config
+      become_user: postgres
+      command: >
+        psql -U postgres
+        -c "SELECT pg_reload_conf();"
+
+
+# ==============================================================
+# PLAY 2: Установка и настройка PgBouncer
+# ==============================================================
+- name: "PLAY 2 | Установка и настройка PgBouncer"
+  hosts: pgbouncer
+  become: true
+  gather_facts: true
+
+  # Переопределяем primary хост — берём pg1 как дефолтный primary.
+  # При failover запустите скрипт /usr/local/bin/pgbouncer-update-primary.sh
+  # или перезапустите playbook с -e pgbouncer_primary_host=172.20.0.22
+  vars:
+    pgbouncer_primary_host: "{{ hostvars['pg1']['patroni_node_ip'] }}"
+
+  roles:
+    - role: pgbouncer

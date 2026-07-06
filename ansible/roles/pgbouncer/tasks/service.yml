@@ -1,0 +1,38 @@
+---
+# ============================================================
+# service.yml — запуск и управление сервисом PgBouncer
+# ============================================================
+
+# Сбрасываем накопившиеся handlers ДО запуска сервиса.
+# Иначе reload pgbouncer.ini срабатывает уже после verify-задач.
+- name: "Применяем накопленные handlers (flush)"
+  meta: flush_handlers
+
+- name: "Перезагружаем systemd daemon"
+  systemd:
+    daemon_reload: true
+
+- name: "Включаем PgBouncer в автозапуск и стартуем"
+  systemd:
+    name: pgbouncer
+    state: started
+    enabled: true
+
+- name: "Ждём пока PgBouncer начнёт слушать порт {{ pgbouncer_listen_port }}"
+  wait_for:
+    host: "127.0.0.1"
+    port: "{{ pgbouncer_listen_port }}"
+    timeout: 30
+    state: started
+    delay: 2
+
+- name: "Проверяем статус сервиса"
+  systemd:
+    name: pgbouncer
+  register: pgbouncer_service_status
+
+- name: "Статус PgBouncer"
+  debug:
+    msg:
+      - "State: {{ pgbouncer_service_status.status.ActiveState }}"
+      - "SubState: {{ pgbouncer_service_status.status.SubState }}"

@@ -1,0 +1,101 @@
+---
+# ============================================================
+# configure.yml — генерация конфигурационных файлов
+#
+# PgBouncer использует два файла:
+#   pgbouncer.ini  — основной конфиг (пулы, таймауты, порты)
+#   userlist.txt   — пользователи и MD5-хэши паролей
+#
+# Оба файла генерируются из Jinja2 шаблонов.
+# ============================================================
+
+- name: "Создаём директорию для логов"
+  file:
+    path: "{{ pgbouncer_log_dir }}"
+    state: directory
+    owner: "{{ pgbouncer_user }}"
+    group: "{{ pgbouncer_group }}"
+    mode: "0755"
+
+- name: "Создаём директорию для PID файла"
+  file:
+    path: "/run/pgbouncer"
+    state: directory
+    owner: "{{ pgbouncer_user }}"
+    group: "{{ pgbouncer_group }}"
+    mode: "0755"
+
+# ----------------------------------------------------------
+# Главный конфиг — pgbouncer.ini
+# ----------------------------------------------------------
+- name: "Генерируем pgbouncer.ini"
+  template:
+    src: pgbouncer.ini.j2
+    dest: "{{ pgbouncer_config_dir }}/pgbouncer.ini"
+    owner: "{{ pgbouncer_user }}"
+    group: "{{ pgbouncer_group }}"
+    mode: "0640"
+  notify: reload pgbouncer
+
+- name: "Показываем сгенерированный pgbouncer.ini"
+  slurp:
+    src: "{{ pgbouncer_config_dir }}/pgbouncer.ini"
+  register: pgbouncer_ini_content
+
+- name: "Содержимое pgbouncer.ini"
+  debug:
+    msg: "{{ pgbouncer_ini_content.content | b64decode }}"
+
+# ----------------------------------------------------------
+# Файл аутентификации — userlist.txt
+#
+# Формат строки: "username" "md5<hex>"
+# Где <hex> = md5(password + username) — пароль + имя слитно.
+#
+# Почему MD5, а не plaintext:
+#   userlist.txt может прочитать любой процесс от pgbouncer.
+#   MD5 — минимальная защита; в production используйте scram-sha-256
+#   или auth_query для запроса паролей напрямую из pg_shadow.
+# ----------------------------------------------------------
+- name: "Генерируем userlist.txt"
+  template:
+    src: userlist.txt.j2
+    dest: "{{ pgbouncer_auth_file }}"
+    owner: "{{ pgbouncer_user }}"
+    group: "{{ pgbouncer_group }}"
+    # 0600 — только pgbouncer читает, пароли не должны утечь
+    mode: "0600"
+  notify: reload pgbouncer
+
+# ----------------------------------------------------------
+# Скрипт обновления primary при failover
+#
+# В Patroni-кластере primary может смениться.
+# Этот скрипт перечитывает текущего лидера через Patroni REST API
+# и обновляет секцию [databases] в pgbouncer.ini.
+#
+# Использование:
+#   /usr/local/bin/pgbouncer-update-primary.sh
+#
+# Для автоматического вызова при failover добавьте в patroni.yml:
+#   callbacks:
+#     on_role_change: /usr/local/bin/pgbouncer-update-primary.sh
+# ----------------------------------------------------------
+- name: "Устанавливаем скрипт обновления primary"
+  template:
+    src: pgbouncer-update-primary.sh.j2
+    dest: /usr/local/bin/pgbouncer-update-primary.sh
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: "Создаём systemd unit для PgBouncer (переопределяем дефолтный)"
+  template:
+    src: pgbouncer.service.j2
+    dest: /etc/systemd/system/pgbouncer.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - reload systemd daemon
+    - restart pgbouncer

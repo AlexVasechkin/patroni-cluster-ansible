@@ -1,0 +1,89 @@
+---
+# ============================================================
+# verify.yml — функциональная проверка PgBouncer
+#
+# Проверяем цепочку:
+#   psql → PgBouncer (6432) → PostgreSQL primary (5432)
+# ============================================================
+
+- name: "Проверяем подключение через PgBouncer к PostgreSQL"
+  community.postgresql.postgresql_query:
+    login_host: "127.0.0.1"
+    login_port: "{{ pgbouncer_listen_port }}"
+    login_user: "{{ patroni_superuser }}"
+    login_password: "{{ patroni_superuser_password }}"
+    db: postgres
+    query: "SELECT version(), inet_server_addr() AS server_ip, pg_is_in_recovery() AS is_replica"
+  register: pg_via_pgbouncer
+  # Модуль community.postgresql может быть не установлен — используем psql
+  ignore_errors: true
+
+# Fallback: psql с явными флагами (избегаем проблем с multiline строкой подключения)
+- name: "Проверяем подключение через PgBouncer (через psql)"
+  command:
+    argv:
+      - psql
+      - -h
+      - "127.0.0.1"
+      - -p
+      - "{{ pgbouncer_listen_port }}"
+      - -U
+      - "{{ patroni_superuser }}"
+      - -d
+      - postgres
+      - -c
+      - "SELECT version(), inet_server_addr() AS server_ip, pg_is_in_recovery() AS is_replica;"
+  environment:
+    PGPASSWORD: "{{ patroni_superuser_password }}"
+  register: psql_via_pgbouncer
+  changed_when: false
+
+- name: "Результат подключения через PgBouncer"
+  debug:
+    msg: "{{ psql_via_pgbouncer.stdout_lines }}"
+
+- name: "Проверяем пулы через PgBouncer admin console"
+  command:
+    argv:
+      - psql
+      - -h
+      - "127.0.0.1"
+      - -p
+      - "{{ pgbouncer_listen_port }}"
+      - -U
+      - "{{ patroni_superuser }}"
+      - -d
+      - pgbouncer
+      - -c
+      - "SHOW POOLS;"
+  environment:
+    PGPASSWORD: "{{ patroni_superuser_password }}"
+  register: pgbouncer_pools
+  changed_when: false
+
+- name: "Пулы PgBouncer (SHOW POOLS)"
+  debug:
+    msg: "{{ pgbouncer_pools.stdout_lines }}"
+
+- name: "Проверяем статистику серверов"
+  command:
+    argv:
+      - psql
+      - -h
+      - "127.0.0.1"
+      - -p
+      - "{{ pgbouncer_listen_port }}"
+      - -U
+      - "{{ patroni_superuser }}"
+      - -d
+      - pgbouncer
+      - -c
+      - "SHOW SERVERS;"
+  environment:
+    PGPASSWORD: "{{ patroni_superuser_password }}"
+  register: pgbouncer_servers
+  changed_when: false
+
+- name: "Серверные соединения PgBouncer (SHOW SERVERS)"
+  debug:
+    msg: "{{ pgbouncer_servers.stdout_lines }}"
