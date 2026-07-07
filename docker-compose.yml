@@ -156,6 +156,32 @@ services:
       # PgBouncer слушает клиентские подключения
       - "6432:6432"
 
+  # ----------------------------------------------------------
+  # BACKUP REPOSITORY — pgBackRest repository host
+  # Выделенный узел-репозиторий для бэкапов и архива WAL.
+  #
+  # Зачем отдельный хост (best practice):
+  #   - Бэкапы физически отделены от данных PostgreSQL: падение
+  #     pg-ноды (диск, файловая система) не уносит с собой бэкапы.
+  #   - pg-ноды пушат WAL сюда (archive-push), а этот узел
+  #     инициирует backup/restore к pg-нодам по SSH.
+  #   - Репозиторий живёт в отдельном Docker-томе backup-repo.
+  # ----------------------------------------------------------
+  backup1:
+    <<: *node-common
+    container_name: backup1
+    hostname: backup1
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.40
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Репозиторий pgBackRest — persist между перезапусками
+      - backup-repo:/var/lib/pgbackrest
+    ports:
+      # SSH для Ansible (с хоста: ssh -p 2227 ansible@localhost)
+      - "2227:22"
+
 # -----------------------------------------------------------
 # Named volumes для данных PostgreSQL
 # Данные живут в Docker-томах и не теряются при docker-compose down
@@ -166,3 +192,6 @@ volumes:
     name: patroni_pg1_data
   pg2-data:
     name: patroni_pg2_data
+  # Репозиторий бэкапов pgBackRest (переживает docker-compose down)
+  backup-repo:
+    name: patroni_backup_repo

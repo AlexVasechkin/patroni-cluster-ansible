@@ -1,0 +1,15 @@
+---
+# ============================================================
+# verify.yml — функциональная проверка pgBackRest (repo-хост).
+# Показывает список бэкапов и статус архива WAL.
+# ============================================================
+
+- name: "pgbackrest info — сводка по stanza и бэкапам"
+  command: "pgbackrest --stanza={{ pgbackrest_stanza }} info"
+  become_user: "{{ pgbackrest_repo_user }}"
+  register: pgbackrest_info
+  changed_when: false
+
+- name: "Состояние репозитория pgBackRest"
+  debug:
+    msg: "{{ pgbackrest_info.stdout_lines }}"

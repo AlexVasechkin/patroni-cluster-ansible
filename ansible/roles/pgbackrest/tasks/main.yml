@@ -1,0 +1,24 @@
+---
+# ============================================================
+# Роль pgbackrest — точка входа
+#
+# Порядок: установка → SSH-связность → конфигурация.
+#
+# Внимание: stanza-create / первый бэкап и функциональная проверка
+# ВЫНЕСЕНЫ из этого файла (stanza.yml / verify.yml) и вызываются из
+# playbook'а ПОСЛЕ включения archive_mode/archive_command через
+# patronictl edit-config — иначе `pgbackrest check` не пройдёт
+# (проверка гоняет тестовый WAL через archive_command).
+# ============================================================
+
+- name: "Установка pgBackRest"
+  import_tasks: install.yml
+  tags: [pgbackrest, install]
+
+- name: "Настройка SSH-связности repo <-> db"
+  import_tasks: ssh.yml
+  tags: [pgbackrest, ssh]
+
+- name: "Конфигурация pgBackRest"
+  import_tasks: configure.yml
+  tags: [pgbackrest, configure]

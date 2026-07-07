@@ -1,0 +1,83 @@
+---
+# ============================================================
+# stanza.yml — инициализация stanza, первый бэкап, расписание.
+#
+# Выполняется ТОЛЬКО на repo-хосте (backup1) и ТОЛЬКО ПОСЛЕ того,
+# как в кластере включены archive_mode / archive_command (иначе
+# `pgbackrest check` не пройдёт — он гоняет тестовый WAL).
+#
+# Все команды pgbackrest здесь запускаются от пользователя
+# pgbackrest (владелец репозитория и SSH-ключей).
+# ============================================================
+
+- name: "stanza-create — инициализируем stanza в репозитории"
+  command: "pgbackrest --stanza={{ pgbackrest_stanza }} stanza-create"
+  become_user: "{{ pgbackrest_repo_user }}"
+  register: pgbackrest_stanza_create
+  # stanza-create идемпотентна: повторный запуск на готовой stanza
+  # завершается успешно и ничего не меняет. pgBackRest пишет лог в stderr.
+  changed_when: >-
+    'completed successfully' in
+    (pgbackrest_stanza_create.stdout + pgbackrest_stanza_create.stderr)
+
+- name: "check — проверяем archive_command и доступность репозитория"
+  command: "pgbackrest --stanza={{ pgbackrest_stanza }} check"
+  become_user: "{{ pgbackrest_repo_user }}"
+  changed_when: false
+
+- name: "Проверяем, есть ли уже полный бэкап"
+  command: "pgbackrest --stanza={{ pgbackrest_stanza }} --output=json info"
+  become_user: "{{ pgbackrest_repo_user }}"
+  register: pgbackrest_info_json
+  changed_when: false
+
+- name: "Первый полный бэкап (только если бэкапов ещё нет)"
+  command: "pgbackrest --stanza={{ pgbackrest_stanza }} --type=full backup"
+  become_user: "{{ pgbackrest_repo_user }}"
+  when: (pgbackrest_info_json.stdout | from_json | first).backup | length == 0
+
+# ----------------------------------------------------------
+# Расписание регулярных бэкапов через cron.
+# full — еженедельно, incr — ежедневно. Архивирование WAL идёт
+# непрерывно (archive_command), поэтому PITR возможен на любой
+# момент между бэкапами.
+# ----------------------------------------------------------
+# Минимальный образ Ubuntu не содержит cron — ставим пакет и запускаем сервис,
+# иначе модуль ansible.builtin.cron не найдёт бинарь crontab, а задания не пойдут.
+- name: "Устанавливаем cron (для расписания бэкапов)"
+  apt:
+    name: cron
+    state: present
+    update_cache: true
+
+- name: "Включаем и запускаем сервис cron"
+  systemd:
+    name: cron
+    state: started
+    enabled: true
+
+- name: "Устанавливаем скрипт-обёртку для бэкапов"
+  template:
+    src: pgbackrest-backup.sh.j2
+    dest: /usr/local/bin/pgbackrest-backup.sh
+    owner: "{{ pgbackrest_repo_user }}"
+    group: "{{ pgbackrest_repo_user }}"
+    mode: "0755"
+
+- name: "cron: полный бэкап еженедельно (вс, 02:00)"
+  cron:
+    name: "pgbackrest full backup"
+    user: "{{ pgbackrest_repo_user }}"
+    weekday: "0"
+    hour: "2"
+    minute: "0"
+    job: "/usr/local/bin/pgbackrest-backup.sh full"
+
+- name: "cron: инкрементальный бэкап ежедневно (пн–сб, 02:00)"
+  cron:
+    name: "pgbackrest incr backup"
+    user: "{{ pgbackrest_repo_user }}"
+    weekday: "1-6"
+    hour: "2"
+    minute: "0"
+    job: "/usr/local/bin/pgbackrest-backup.sh incr"

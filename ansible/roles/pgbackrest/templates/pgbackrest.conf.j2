@@ -1,0 +1,67 @@
+# ============================================================
+# pgBackRest configuration — {{ inventory_hostname }}
+# Сгенерировано Ansible — не редактировать вручную
+#
+# Роль хоста: {% if inventory_hostname in groups['backup'] %}РЕПОЗИТОРНЫЙ (repo host){% else %}БД-НОДА (db host){% endif %}
+
+#
+# Структура:
+#   [global]          — общие настройки (сжатие, параллелизм, логи)
+#   [global] repo/host — где репозиторий / как достучаться до repo
+#   [{{ pgbackrest_stanza }}]  — stanza: описание PostgreSQL-кластера
+# ============================================================
+
+[global]
+# Каталог репозитория бэкапов (физически существует на repo-хосте).
+repo1-path={{ pgbackrest_repo_path }}
+{% if inventory_hostname in groups['backup'] %}
+
+# --- Хранение и шифрование (только на repo-хосте) ---
+# Держим последние N полных бэкапов; устаревшие full + их diff/incr +
+# ненужный уже архив WAL удаляются автоматически при expire.
+repo1-retention-full={{ pgbackrest_retention_full }}
+# Шифрование репозитория. none — учебно; в production: aes-256-cbc
+# (+ repo1-cipher-pass в защищённом месте).
+repo1-cipher-type={{ pgbackrest_cipher_type }}
+{% else %}
+
+# --- Доступ к выделенному repo-хосту (на db-нодах) ---
+# WAL (archive-push) и бэкапы уходят на этот хост по SSH.
+repo1-host={{ pgbackrest_repo_host }}
+repo1-host-user={{ pgbackrest_repo_user }}
+{% endif %}
+
+# --- Общие настройки ---
+# Сжатие репозитория, степень параллелизма, ускоренный старт бэкапа
+# (start-fast=y форсирует checkpoint сразу, не ждём естественного).
+compress-type={{ pgbackrest_compress_type }}
+process-max={{ pgbackrest_process_max }}
+start-fast=y
+
+# Логирование
+log-path={{ pgbackrest_log_dir }}
+log-level-console={{ pgbackrest_log_level_console }}
+log-level-file={{ pgbackrest_log_level_file }}
+
+# ============================================================
+# Stanza — логический PostgreSQL-кластер в терминах pgBackRest.
+# Имя совпадает с именем Patroni-кластера.
+# ============================================================
+[{{ pgbackrest_stanza }}]
+{% if inventory_hostname in groups['backup'] %}
+# repo-хост знает обо ВСЕХ db-нодах кластера (primary + реплики).
+# Индекс pgN здесь — просто порядковый номер ноды в stanza.
+{% for node in patroni_nodes %}
+pg{{ loop.index }}-host={{ node.name }}
+pg{{ loop.index }}-host-user={{ pgbackrest_db_os_user }}
+pg{{ loop.index }}-path={{ hostvars[node.name].postgresql_data_dir }}
+pg{{ loop.index }}-port={{ hostvars[node.name].postgresql_port | default(5432) }}
+pg{{ loop.index }}-socket-path={{ pgbackrest_pg_socket_path }}
+{% endfor %}
+{% else %}
+# db-нода знает только про СЕБЯ (локальный data_dir, индекс 1).
+# archive-push / restore выполняются локально и обращаются к repo по SSH.
+pg1-path={{ postgresql_data_dir }}
+pg1-port={{ postgresql_port }}
+pg1-socket-path={{ pgbackrest_pg_socket_path }}
+{% endif %}

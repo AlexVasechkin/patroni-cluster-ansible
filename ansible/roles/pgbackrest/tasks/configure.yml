@@ -1,0 +1,49 @@
+---
+# ============================================================
+# configure.yml — каталоги и файл конфигурации pgBackRest
+#
+# pgbackrest_os_user / pgbackrest_os_home установлены в ssh.yml
+# (выполняется раньше по порядку из main.yml).
+# ============================================================
+
+- name: "Создаём каталог конфигурации {{ pgbackrest_config_dir }}"
+  file:
+    path: "{{ pgbackrest_config_dir }}"
+    state: directory
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0750"
+
+- name: "Создаём каталог логов {{ pgbackrest_log_dir }}"
+  file:
+    path: "{{ pgbackrest_log_dir }}"
+    state: directory
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0750"
+
+- name: "repo-хост: создаём каталог репозитория {{ pgbackrest_repo_path }}"
+  file:
+    path: "{{ pgbackrest_repo_path }}"
+    state: directory
+    owner: "{{ pgbackrest_repo_user }}"
+    group: "{{ pgbackrest_repo_user }}"
+    mode: "0750"
+  when: inventory_hostname in groups['backup']
+
+- name: "Генерируем pgbackrest.conf"
+  template:
+    src: pgbackrest.conf.j2
+    dest: "{{ pgbackrest_config_file }}"
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0640"
+
+- name: "Показываем сгенерированный pgbackrest.conf"
+  slurp:
+    src: "{{ pgbackrest_config_file }}"
+  register: pgbackrest_conf_content
+
+- name: "Содержимое pgbackrest.conf на {{ inventory_hostname }}"
+  debug:
+    msg: "{{ (pgbackrest_conf_content.content | b64decode).split('\n') }}"

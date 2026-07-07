@@ -43,9 +43,40 @@ patroni_superuser_password: "postgres_pass"
 # Порт Patroni REST API — используется и postgres-нодами и pgbouncer-скриптом
 patroni_api_port: 8008
 
-# PostgreSQL-ноды кластера (используются в скрипте pgbouncer-update-primary.sh)
+# PostgreSQL-ноды кластера (используются в скрипте pgbouncer-update-primary.sh
+# и в конфиге pgBackRest на репозиторном хосте — pgN-host)
 patroni_nodes:
   - name: pg1
     ip: "172.20.0.21"
   - name: pg2
     ip: "172.20.0.22"
+
+# ============================================================
+# pgBackRest — резервное копирование и PITR
+# Общие параметры видны и pg-нодам (archive-push), и репозиторному
+# хосту backup1 (backup/restore). Детали — в roles/pgbackrest/defaults.
+# ============================================================
+
+# Имя stanza — логическое имя кластера в pgBackRest.
+# Совпадает с именем Patroni-кластера для наглядности.
+pgbackrest_stanza: "{{ patroni_cluster_name }}"
+
+# Репозиторный хост (inventory hostname из группы [backup]) и его IP.
+pgbackrest_repo_host: "backup1"
+pgbackrest_repo_host_ip: "172.20.0.40"
+
+# Системный пользователь, от которого pgBackRest работает на репозитории.
+# По SSH под ним ходят archive-push с pg-нод и backup/restore к pg-нодам.
+pgbackrest_repo_user: "pgbackrest"
+
+# Флаг включения архивации в шаблоне patroni.yml.j2.
+#   false — свежий bootstrap (playbook 02) поднимается БЕЗ архивации.
+#   true  — patroni.yml содержит archive_mode/archive_command и
+#           create_replica_methods=pgbackrest.
+# Playbook 04 включает архивацию на ЖИВОМ кластере через edit-config;
+# после его успешного прогона выставьте здесь true, чтобы полный
+# ре-деплой (01→02→03) тоже поднимался сразу с архивацией.
+pgbackrest_enabled: false
+
+# Максимальный интервал между переключениями WAL (ограничивает RPO).
+pgbackrest_archive_timeout: "60s"

@@ -1,0 +1,59 @@
+---
+# ============================================================
+# install.yml — установка пакета pgBackRest
+#
+# Ставим из официального репозитория postgresql.org (pgdg) —
+# там всегда актуальная версия. На pg-нодах репозиторий уже
+# добавлен playbook'ом 02, но операции идемпотентны.
+# ============================================================
+
+- name: "Обновляем кэш apt"
+  apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: "Устанавливаем зависимости для добавления репозитория"
+  apt:
+    name:
+      - curl
+      - ca-certificates
+      - gnupg
+      - lsb-release
+      - acl          # нужен Ansible для become_user на непривилегированного пользователя
+    state: present
+
+- name: "Создаём директорию для GPG ключей"
+  file:
+    path: /usr/share/postgresql-common/pgdg
+    state: directory
+    mode: "0755"
+
+- name: "Скачиваем GPG ключ PostgreSQL (pgdg)"
+  get_url:
+    url: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+    dest: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+    mode: "0644"
+
+- name: "Добавляем pgdg репозиторий"
+  apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc]
+      https://apt.postgresql.org/pub/repos/apt
+      {{ ansible_distribution_release }}-pgdg main
+    state: present
+    filename: pgdg
+    update_cache: true
+
+- name: "Устанавливаем pgbackrest"
+  apt:
+    name: pgbackrest
+    state: present
+
+- name: "Проверяем версию pgBackRest"
+  command: pgbackrest version
+  register: pgbackrest_ver
+  changed_when: false
+
+- name: "Версия pgBackRest"
+  debug:
+    msg: "{{ pgbackrest_ver.stdout }}"

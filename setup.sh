@@ -56,7 +56,7 @@ sleep 10
 echo ""
 echo "[4/4] Добавляем SSH host-ключи в ~/.ssh/known_hosts..."
 
-PORTS=(2221 2222 2223 2224 2225)
+PORTS=(2221 2222 2223 2224 2225 2226 2227)
 for port in "${PORTS[@]}"; do
     # Удаляем старые записи (на случай пересборки)
     ssh-keygen -R "[localhost]:$port" 2>/dev/null || true

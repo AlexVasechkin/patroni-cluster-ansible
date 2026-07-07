@@ -1,0 +1,218 @@
+---
+# ============================================================
+# Playbook 04: pgBackRest — непрерывное архивирование WAL + PITR
+#
+# Запуск:
+#   ansible-playbook -i inventory.ini 04_pgbackrest_playbook.yml
+#
+# Что делает (по plays):
+#   PLAY 1 [postgres:backup] — ставит pgBackRest, настраивает SSH
+#                              repo<->db, генерирует pgbackrest.conf.
+#   PLAY 2 [postgres]        — включает archive_mode/archive_command в
+#                              ЖИВОМ кластере через patronictl edit-config
+#                              (пишет в DCS) + обновляет локальный
+#                              patroni.yml (create_replica_methods) и reload.
+#   PLAY 3 [pg1]             — rolling restart нод с pending-restart
+#                              (archive_mode применяется только при старте).
+#   PLAY 4 [backup]          — stanza-create, check, первый full backup,
+#                              cron-расписание.
+#   PLAY 5 [backup+pg1]      — функциональная проверка (info, pg_stat_archiver).
+#
+# Почему архивные ПАРАМЕТРЫ (archive_mode/command) идут через edit-config,
+# а create_replica_methods — через локальный patroni.yml:
+#   - archive_* это postgresql.parameters → хранятся в DCS, общие для
+#     кластера, меняются на лету через edit-config.
+#   - create_replica_methods/recovery_conf это ЛОКАЛЬНАЯ конфигурация
+#     ноды Patroni (ссылается на локальные команды) → живёт в patroni.yml
+#     и подхватывается через reload.
+# ============================================================
+
+# Включаем архивацию в шаблоне patroni.yml для этого прогона.
+# (В group_vars/all.yml по умолчанию false — см. комментарий там.)
+- name: "PLAY 1 | Установка и конфигурация pgBackRest"
+  hosts: postgres:backup
+  become: true
+  gather_facts: true
+  vars:
+    pgbackrest_enabled: true
+  roles:
+    - pgbackrest
+
+
+# ==============================================================
+# PLAY 2: Включение архивации на живом кластере
+# ==============================================================
+- name: "PLAY 2 | Включаем архивирование WAL (edit-config + reload)"
+  hosts: postgres
+  become: true
+  vars:
+    pgbackrest_enabled: true
+
+  tasks:
+
+    # --- Локальная конфигурация Patroni: create_replica_methods, recovery_conf ---
+    - name: "2.1 | Перегенерируем patroni.yml с настройками pgBackRest"
+      template:
+        src: patroni.yml.j2
+        dest: "{{ patroni_config_dir }}/patroni.yml"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+
+    - name: "2.2 | Reload Patroni — применить локальные изменения конфига"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        reload {{ patroni_cluster_name }} --force
+      become_user: postgres
+      changed_when: false
+
+
+# ==============================================================
+# PLAY 3: Параметры архивации в DCS + rolling restart
+# Выполняем с pg1 (edit-config пишет в общий DCS — достаточно одной ноды).
+# ==============================================================
+- name: "PLAY 3 | Параметры archive_* в DCS и рестарт"
+  hosts: pg1
+  become: true
+
+  tasks:
+
+    - name: "3.1 | Прописываем archive_mode/archive_command/archive_timeout в DCS"
+      command:
+        argv:
+          - patronictl
+          - -c
+          - "{{ patroni_config_dir }}/patroni.yml"
+          - edit-config
+          - "{{ patroni_cluster_name }}"
+          - --force
+          # ВАЖНО: archive_mode="on" в кавычках — иначе patronictl распарсит
+          # `on` как YAML-boolean → Patroni запишет archive_mode = 'True',
+          # а это невалидное значение enum {off,on,always} → PG не стартует.
+          - -p
+          - 'archive_mode="on"'
+          - -p
+          - "archive_command=pgbackrest --stanza={{ pgbackrest_stanza }} archive-push %p"
+          - -p
+          - "archive_timeout={{ pgbackrest_archive_timeout }}"
+      become_user: postgres
+      register: edit_config_result
+      # patronictl печатает «Not changed», если конфиг уже актуален.
+      changed_when: >-
+        'not changed' not in
+        ((edit_config_result.stdout + edit_config_result.stderr) | lower)
+
+    - name: "3.1 | Результат edit-config"
+      debug:
+        msg: "{{ edit_config_result.stdout_lines }}"
+
+    # archive_mode читается только при старте PostgreSQL → нужен рестарт.
+    # Рестартуем ВСЕ ноды кластера явно (не --pending): флаг pending-restart
+    # выставляется Patroni лишь на следующем HA-цикле, поэтому --pending сразу
+    # после edit-config может ничего не рестартовать (race). Кратковременное
+    # прерывание записи на primary — ожидаемо (учебно).
+    - name: "3.2 | Рестартуем кластер для применения archive_mode"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        restart {{ patroni_cluster_name }} --force
+      become_user: postgres
+      register: restart_result
+      # Рестартуем только если edit-config реально изменил параметры
+      # (иначе повторный прогон плейбука зря дёргает кластер).
+      when: edit_config_result.changed
+      changed_when: true
+
+    - name: "3.3 | Ждём, пока обе ноды снова running"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        list {{ patroni_cluster_name }} --format json
+      become_user: postgres
+      register: cluster_state
+      retries: 12
+      delay: 5
+      until: >
+        (cluster_state.stdout | from_json | selectattr('State', 'in', ['running', 'streaming'])
+         | list | length) == (cluster_state.stdout | from_json | length)
+      changed_when: false
+
+
+# ==============================================================
+# PLAY 3b: Убеждаемся, что archive_mode реально включён на всех нодах
+# (страхует stanza-check от гонки «рестарт ещё не применился»).
+# ==============================================================
+- name: "PLAY 3b | Проверяем archive_mode=on на всех нодах"
+  hosts: postgres
+  become: true
+
+  tasks:
+
+    - name: "3b.1 | Ждём archive_mode=on"
+      command: psql -tAc "SHOW archive_mode;"
+      become_user: postgres
+      register: archive_mode_check
+      until: archive_mode_check.stdout | trim == "on"
+      retries: 12
+      delay: 5
+      changed_when: false
+
+
+# ==============================================================
+# PLAY 4: Инициализация репозитория и первый бэкап
+# ==============================================================
+- name: "PLAY 4 | stanza-create, первый бэкап, расписание"
+  hosts: backup
+  become: true
+  vars:
+    pgbackrest_enabled: true
+
+  tasks:
+
+    - name: "4.1 | stanza-create + check + первый full backup + cron"
+      include_role:
+        name: pgbackrest
+        tasks_from: stanza
+
+
+# ==============================================================
+# PLAY 5: Функциональная проверка
+# ==============================================================
+- name: "PLAY 5 | Проверка репозитория и архивации"
+  hosts: backup
+  become: true
+
+  tasks:
+
+    - name: "5.1 | pgbackrest info"
+      include_role:
+        name: pgbackrest
+        tasks_from: verify
+
+- name: "PLAY 5b | Проверка архивации на primary"
+  hosts: pg1
+  become: true
+
+  tasks:
+
+    - name: "5.2 | Статистика архиватора WAL (pg_stat_archiver)"
+      command:
+        argv:
+          - psql
+          - -U
+          - "{{ patroni_superuser }}"
+          - -d
+          - postgres
+          - -x
+          - -c
+          - >-
+            SELECT archived_count, last_archived_wal, last_archived_time,
+                   failed_count, last_failed_wal, last_failed_time
+            FROM pg_stat_archiver;
+      become_user: postgres
+      environment:
+        PGPASSWORD: "{{ patroni_superuser_password }}"
+      register: archiver_stat
+      changed_when: false
+
+    - name: "5.2 | pg_stat_archiver"
+      debug:
+        msg: "{{ archiver_stat.stdout_lines }}"

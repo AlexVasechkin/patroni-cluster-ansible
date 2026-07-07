@@ -1,0 +1,106 @@
+---
+# ============================================================
+# ssh.yml — passwordless SSH между repo-хостом и db-нодами
+#
+# pgBackRest в режиме выделенного репозитория общается по SSH:
+#   - postgres@pgN  --SSH-->  pgbackrest@backup1   (archive-push WAL)
+#   - pgbackrest@backup1  --SSH-->  postgres@pgN    (backup / restore)
+#
+# Поэтому нужна ВЗАИМНАЯ авторизация ключей. Стратегия linear
+# (по умолчанию) выполняет каждую задачу на всех хостах до перехода
+# к следующей — поэтому после раздачи фактов публичные ключи всех
+# нод доступны через hostvars.
+# ============================================================
+
+- name: "repo-хост: создаём системного пользователя pgbackrest"
+  user:
+    name: "{{ pgbackrest_repo_user }}"
+    shell: /bin/bash          # shell нужен для выполнения ssh-команд
+    home: "/home/{{ pgbackrest_repo_user }}"
+    create_home: true
+    state: present
+  when: inventory_hostname in groups['backup']
+
+- name: "Определяем OS-пользователя pgBackRest на этой ноде"
+  set_fact:
+    # На repo-хосте — pgbackrest, на db-нодах — postgres (владелец data_dir)
+    pgbackrest_os_user: >-
+      {{ pgbackrest_repo_user if inventory_hostname in groups['backup']
+         else pgbackrest_db_os_user }}
+
+- name: "Узнаём домашний каталог пользователя {{ pgbackrest_os_user }}"
+  getent:
+    database: passwd
+    key: "{{ pgbackrest_os_user }}"
+
+- name: "Сохраняем домашний каталог в факт"
+  set_fact:
+    pgbackrest_os_home: "{{ getent_passwd[pgbackrest_os_user][4] }}"
+
+- name: "Создаём ~/.ssh для {{ pgbackrest_os_user }}"
+  file:
+    path: "{{ pgbackrest_os_home }}/.ssh"
+    state: directory
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0700"
+
+- name: "Генерируем SSH-ключ {{ pgbackrest_ssh_key_type }} (если ещё нет)"
+  command:
+    cmd: >-
+      ssh-keygen -t {{ pgbackrest_ssh_key_type }}
+      -f {{ pgbackrest_os_home }}/.ssh/id_{{ pgbackrest_ssh_key_type }}
+      -N '' -C {{ pgbackrest_os_user }}@{{ inventory_hostname }}
+    creates: "{{ pgbackrest_os_home }}/.ssh/id_{{ pgbackrest_ssh_key_type }}"
+  become_user: "{{ pgbackrest_os_user }}"
+
+- name: "Читаем публичный ключ"
+  slurp:
+    src: "{{ pgbackrest_os_home }}/.ssh/id_{{ pgbackrest_ssh_key_type }}.pub"
+  register: pgbackrest_pubkey_slurp
+
+- name: "Сохраняем публичный ключ в факт (виден через hostvars)"
+  set_fact:
+    pgbackrest_pubkey: "{{ pgbackrest_pubkey_slurp.content | b64decode | trim }}"
+
+# ----------------------------------------------------------
+# Раздача authorized_keys (взаимная авторизация)
+# ----------------------------------------------------------
+- name: "repo-хост: авторизуем ключи postgres@pg-нод"
+  lineinfile:
+    path: "{{ pgbackrest_os_home }}/.ssh/authorized_keys"
+    line: "{{ hostvars[item].pgbackrest_pubkey }}"
+    create: true
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0600"
+  loop: "{{ groups['postgres'] }}"
+  when: inventory_hostname in groups['backup']
+
+- name: "db-нода: авторизуем ключ pgbackrest@repo-хоста"
+  lineinfile:
+    path: "{{ pgbackrest_os_home }}/.ssh/authorized_keys"
+    line: "{{ hostvars[pgbackrest_repo_host].pgbackrest_pubkey }}"
+    create: true
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0600"
+  when: inventory_hostname in groups['postgres']
+
+# ----------------------------------------------------------
+# SSH client config — без интерактивной проверки host-ключей.
+# accept-new автоматически принимает ключ при первом контакте и
+# дальше проверяет его. Для учебной среды достаточно; в production
+# используйте предзаполненный known_hosts с пиннингом ключей.
+# ----------------------------------------------------------
+- name: "Пишем ~/.ssh/config"
+  copy:
+    dest: "{{ pgbackrest_os_home }}/.ssh/config"
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0600"
+    content: |
+      # Сгенерировано Ansible (роль pgbackrest)
+      Host {{ groups['postgres'] | join(' ') }} {{ pgbackrest_repo_host }}
+          StrictHostKeyChecking accept-new
+          LogLevel ERROR

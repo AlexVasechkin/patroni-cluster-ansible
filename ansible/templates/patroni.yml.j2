@@ -49,6 +49,33 @@ etcd3:
 # Остальные ноды игнорируют этот раздел и клонируют primary.
 # ----------------------------------------------------------
 bootstrap:
+{% if pitr_bootstrap | default(false) %}
+
+  # ----------------------------------------------------------
+  # PITR-восстановление (одноразовый bootstrap!)
+  #
+  # Когда DCS очищен и data_dir пуст, Patroni на первой ноде
+  # выполняет этот метод ВМЕСТО initdb: pgBackRest восстанавливает
+  # кластер из бэкапа и накатывает архивный WAL до момента
+  # pitr_target_time, затем PostgreSQL промоутится (--target-action).
+  #
+  #   keep_existing_recovery_conf: pgBackRest сам пишет recovery.signal
+  #     + restore_command + recovery_target_time — Patroni их не трогает.
+  #   no_params: не добавлять к команде свои --scope/--datadir и т.п.
+  #
+  # ВАЖНО: после успешного восстановления этот блок нужно убрать
+  # (playbook 05 перегенерирует конфиг с pitr_bootstrap=false), иначе
+  # при следующем ре-бутстрапе Patroni снова уйдёт в PITR.
+  # ----------------------------------------------------------
+  method: pgbackrest_pitr
+  pgbackrest_pitr:
+    command: >-
+      pgbackrest --stanza={{ pgbackrest_stanza }} --delta
+      --type=time --target="{{ pitr_target_time }}"
+      --target-action=promote restore
+    keep_existing_recovery_conf: True
+    no_params: True
+{% endif %}
 
   # Параметры кластера, которые Patroni хранит в etcd.
   # Применяются ко всем нодам (включая будущие реплики).
@@ -92,6 +119,16 @@ bootstrap:
         # Нужно для pg_rewind
         wal_log_hints: "{{ postgresql_wal_log_hints }}"
         shared_buffers: {{ postgresql_shared_buffers }}
+{% if pgbackrest_enabled | default(false) %}
+        # --- Непрерывное архивирование WAL через pgBackRest (для PITR) ---
+        # archive_mode=on требует РЕСТАРТА PostgreSQL (читается только при старте).
+        archive_mode: "on"
+        # Каждый заполненный сегмент WAL уходит в репозиторий pgBackRest.
+        archive_command: 'pgbackrest --stanza={{ pgbackrest_stanza }} archive-push %p'
+        # Форсировать переключение WAL хотя бы раз в N секунд даже при простое —
+        # ограничивает окно потери данных (RPO) при отсутствии записи.
+        archive_timeout: {{ pgbackrest_archive_timeout | default('60s') }}
+{% endif %}
 
   # Опции для pg_ctl initdb при создании нового кластера
   initdb:
@@ -134,6 +171,28 @@ postgresql:
 
   # Файл для хранения паролей (используется pg_rewind, pg_basebackup)
   pgpass: /tmp/.pgpass_{{ inventory_hostname }}
+{% if pgbackrest_enabled | default(false) %}
+
+  # ----------------------------------------------------------
+  # pgBackRest — восстановление реплик и получение архивного WAL
+  #
+  # create_replica_methods: новые/пересобираемые реплики сначала
+  # пытаются восстановиться из репозитория pgBackRest (--delta restore),
+  # разгружая primary; basebackup остаётся запасным методом.
+  #
+  # recovery_conf.restore_command: если streaming replication отстанет,
+  # реплика догонит недостающие сегменты из архива pgBackRest.
+  # ----------------------------------------------------------
+  create_replica_methods:
+    - pgbackrest
+    - basebackup
+  pgbackrest:
+    command: 'pgbackrest --stanza={{ pgbackrest_stanza }} --delta restore'
+    keep_data: True
+    no_params: True
+  recovery_conf:
+    restore_command: 'pgbackrest --stanza={{ pgbackrest_stanza }} archive-get %f "%p"'
+{% endif %}
 
   # Аутентификация
   authentication:

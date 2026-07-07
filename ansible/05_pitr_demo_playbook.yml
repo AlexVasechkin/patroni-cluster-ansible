@@ -1,0 +1,315 @@
+---
+# ============================================================
+# Playbook 05: Демонстрация PITR (point-in-time recovery)
+#
+# ⚠️  РАЗРУШАЮЩИЙ playbook — он ПОЛНОСТЬЮ пересобирает кластер из
+#     бэкапа. Данные, записанные после точки восстановления, теряются
+#     (в этом и смысл демонстрации). Запускать только на учебном стенде.
+#
+# Запуск (нужен явный флаг подтверждения):
+#   ansible-playbook -i inventory.ini 05_pitr_demo_playbook.yml -e pitr_confirm=true
+#
+# Предпосылки: playbook 04 уже настроил pgBackRest (есть full backup и
+# работает архивирование WAL).
+#
+# Сценарий (по plays):
+#   PLAY 1 [pg1]        — пишем «хорошие» данные, фиксируем T_target,
+#                         затем «авария»: пишем данные ПОСЛЕ T_target.
+#   PLAY 2 [postgres]   — останавливаем Patroni на обеих нодах.
+#   PLAY 3 [etcd1]      — очищаем ключи кластера в DCS (etcd).
+#   PLAY 4 [postgres]   — очищаем data_dir обеих нод.
+#   PLAY 5 [pg1]        — bootstrap PITR: pgBackRest restore --type=time
+#                         до T_target, PostgreSQL промоутится в primary.
+#   PLAY 6 [pg1]        — убираем одноразовый PITR-bootstrap из конфига.
+#   PLAY 7 [pg2]        — поднимаем реплику (клон из pgBackRest).
+#   PLAY 8 [pg1]        — проверяем: «хорошие» данные на месте, данные
+#                         после T_target отсутствуют.
+# ============================================================
+
+
+# ==============================================================
+# PLAY 0: Защита от случайного запуска
+# ==============================================================
+- name: "PLAY 0 | Требуем явное подтверждение"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: "Проверяем флаг pitr_confirm"
+      assert:
+        that: pitr_confirm | default(false) | bool
+        fail_msg: >-
+          Это разрушающий playbook. Запустите с -e pitr_confirm=true,
+          если действительно хотите пересобрать кластер из бэкапа.
+        success_msg: "Подтверждение получено — начинаем демонстрацию PITR."
+
+
+# ==============================================================
+# PLAY 1: Генерируем данные и «аварию»
+# ==============================================================
+- name: "PLAY 1 | Данные до/после точки восстановления"
+  hosts: pg1
+  become: true
+  become_user: postgres
+
+  tasks:
+
+    - name: "1.1 | Создаём таблицу и вставляем «хорошие» данные"
+      command:
+        argv:
+          - psql
+          - -d
+          - postgres
+          - -c
+          - >-
+            CREATE TABLE IF NOT EXISTS pitr_demo (id int, note text, created timestamptz DEFAULT now());
+            TRUNCATE pitr_demo;
+            INSERT INTO pitr_demo (id, note) VALUES
+              (1, 'good row before target'),
+              (2, 'good row before target'),
+              (3, 'good row before target');
+      changed_when: true
+
+    - name: "1.2 | Фиксируем точку восстановления T_target = now()"
+      command: psql -d postgres -tAc "SELECT now();"
+      register: t_target_raw
+      changed_when: false
+
+    - name: "1.3 | Сохраняем T_target в факт"
+      set_fact:
+        pitr_target_time: "{{ t_target_raw.stdout | trim }}"
+
+    - name: "1.3 | Точка восстановления"
+      debug:
+        msg: "T_target = {{ pitr_target_time }}"
+
+    # Пауза, чтобы «авария» гарантированно случилась ПОЗЖЕ T_target
+    - name: "1.4 | Небольшая пауза (разделяем во времени)"
+      command: psql -d postgres -tAc "SELECT pg_sleep(2);"
+      changed_when: false
+
+    - name: "1.5 | «Авария»: пишем данные ПОСЛЕ точки восстановления"
+      command:
+        argv:
+          - psql
+          - -d
+          - postgres
+          - -c
+          - >-
+            INSERT INTO pitr_demo (id, note) VALUES
+              (99, 'AFTER target — must disappear after PITR');
+      changed_when: true
+
+    - name: "1.6 | Отметка времени после аварии"
+      command: psql -d postgres -tAc "SELECT now();"
+      register: t_after_raw
+      changed_when: false
+
+    # Форсируем переключение WAL, чтобы сегмент с аварией ушёл в архив —
+    # тогда recovery сможет дойти ровно до T_target (нужен WAL за границей).
+    - name: "1.7 | Форсируем архивацию WAL (pg_switch_wal)"
+      command: psql -d postgres -tAc "SELECT pg_switch_wal();"
+      changed_when: false
+
+    - name: "1.8 | Ждём, пока WAL с аварией заархивируется в pgBackRest"
+      command: >-
+        psql -d postgres -tAc
+        "SELECT last_archived_time >= '{{ t_after_raw.stdout | trim }}'::timestamptz
+         FROM pg_stat_archiver;"
+      register: archived_check
+      until: archived_check.stdout | trim == 't'
+      retries: 24
+      delay: 5
+      changed_when: false
+
+
+# ==============================================================
+# PLAY 2: Останавливаем Patroni на обеих нодах
+# ==============================================================
+- name: "PLAY 2 | Останавливаем Patroni (обе ноды)"
+  hosts: postgres
+  become: true
+  tasks:
+    - name: "2.1 | systemctl stop patroni"
+      systemd:
+        name: patroni
+        state: stopped
+
+
+# ==============================================================
+# PLAY 3: Очищаем состояние кластера в DCS (etcd)
+# Patroni хранит ключи под /service/<scope>/. Удалив их, мы заставим
+# кластер ре-бутстрапнуться (через PITR-метод) вместо обычного старта.
+# ==============================================================
+- name: "PLAY 3 | Очищаем ключи кластера в etcd"
+  hosts: etcd1
+  become: true
+  tasks:
+    - name: "3.1 | etcdctl del --prefix /service/{{ patroni_cluster_name }}"
+      command: >-
+        {{ etcd_bin_dir }}/etcdctl
+        --endpoints=http://{{ etcd_node_ip }}:2379
+        del --prefix /service/{{ patroni_cluster_name }}
+      environment:
+        ETCDCTL_API: "3"
+      register: etcd_del
+      changed_when: true
+
+    - name: "3.1 | Удалено ключей"
+      debug:
+        msg: "Удалено ключей из DCS: {{ etcd_del.stdout | trim }}"
+
+
+# ==============================================================
+# PLAY 4: Очищаем data_dir обеих нод (для чистого restore/clone)
+# ==============================================================
+- name: "PLAY 4 | Очищаем data_dir"
+  hosts: postgres
+  become: true
+  tasks:
+    - name: "4.1 | Удаляем старый data_dir"
+      file:
+        path: "{{ postgresql_data_dir }}"
+        state: absent
+
+    - name: "4.2 | Создаём пустой data_dir (Patroni ждёт пустую директорию)"
+      file:
+        path: "{{ postgresql_data_dir }}"
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: "0700"
+
+
+# ==============================================================
+# PLAY 5: Bootstrap PITR на pg1
+# ==============================================================
+- name: "PLAY 5 | PITR-восстановление primary (pg1)"
+  hosts: pg1
+  become: true
+  vars:
+    pgbackrest_enabled: true
+    pitr_bootstrap: true
+    pitr_target_time: "{{ hostvars['pg1'].pitr_target_time }}"
+
+  tasks:
+
+    - name: "5.1 | Рендерим patroni.yml с PITR-bootstrap (target={{ pitr_target_time }})"
+      template:
+        src: patroni.yml.j2
+        dest: "{{ patroni_config_dir }}/patroni.yml"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+
+    - name: "5.2 | Стартуем Patroni на pg1 (запустит pgBackRest restore)"
+      systemd:
+        name: patroni
+        state: started
+
+    - name: "5.3 | Ждём, пока pg1 восстановится и станет ЛИДЕРОМ"
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/leader"
+        method: GET
+        status_code: 200
+      register: pitr_leader_check
+      retries: 60
+      delay: 5
+      until: pitr_leader_check.status == 200
+      # restore + накат WAL могут занять время — ждём до 5 минут
+
+
+# ==============================================================
+# PLAY 6: Убираем одноразовый PITR-bootstrap из конфига pg1
+# ==============================================================
+- name: "PLAY 6 | Возвращаем нормальный конфиг pg1"
+  hosts: pg1
+  become: true
+  vars:
+    pgbackrest_enabled: true
+    pitr_bootstrap: false
+
+  tasks:
+    - name: "6.1 | Перегенерируем patroni.yml без bootstrap-метода"
+      template:
+        src: patroni.yml.j2
+        dest: "{{ patroni_config_dir }}/patroni.yml"
+        owner: postgres
+        group: postgres
+        mode: "0640"
+
+    - name: "6.2 | Reload Patroni"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        reload {{ patroni_cluster_name }} --force
+      become_user: postgres
+      changed_when: false
+
+
+# ==============================================================
+# PLAY 7: Поднимаем реплику pg2 (клон из pgBackRest)
+# ==============================================================
+- name: "PLAY 7 | Реплика pg2"
+  hosts: pg2
+  become: true
+
+  tasks:
+    - name: "7.1 | Стартуем Patroni на pg2"
+      systemd:
+        name: patroni
+        state: started
+
+    - name: "7.2 | Ждём, пока pg2 станет репликой"
+      uri:
+        url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/replica"
+        method: GET
+        status_code: 200
+      register: pitr_replica_check
+      retries: 60
+      delay: 5
+      until: pitr_replica_check.status == 200
+
+
+# ==============================================================
+# PLAY 8: Проверка результата
+# ==============================================================
+- name: "PLAY 8 | Проверяем результат PITR"
+  hosts: pg1
+  become: true
+  become_user: postgres
+
+  tasks:
+
+    - name: "8.1 | Состояние кластера"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        list {{ patroni_cluster_name }}
+      register: pitr_cluster_list
+      changed_when: false
+
+    - name: "8.1 | patronictl list"
+      debug:
+        msg: "{{ pitr_cluster_list.stdout_lines }}"
+
+    - name: "8.2 | Содержимое pitr_demo после восстановления"
+      command: psql -d postgres -c "SELECT * FROM pitr_demo ORDER BY id;"
+      register: pitr_demo_rows
+      changed_when: false
+
+    - name: "8.2 | Строки pitr_demo (ожидаем только id 1..3, без id 99)"
+      debug:
+        msg: "{{ pitr_demo_rows.stdout_lines }}"
+
+    - name: "8.3 | Проверяем, что данные после T_target исчезли"
+      command: psql -d postgres -tAc "SELECT count(*) FROM pitr_demo WHERE id = 99;"
+      register: after_target_count
+      changed_when: false
+      failed_when: (after_target_count.stdout | trim | int) != 0
+
+    - name: "8.3 | Итог PITR"
+      debug:
+        msg:
+          - "PITR выполнен успешно ✅"
+          - "Восстановлено до T_target = {{ hostvars['pg1'].pitr_target_time }}"
+          - "«Хороших» строк (id 1..3): сохранены"
+          - "Строк после T_target (id 99): {{ after_target_count.stdout | trim }} (ожидалось 0)"
