@@ -14,23 +14,38 @@ patroni_cluster_name: "pg-cluster"
 # Сеть кластера
 cluster_subnet: "172.20.0.0/24"
 
-# IP-адреса etcd-нод (используются в конфиге Patroni и etcd)
+# Хост для локальных healthcheck-проверок (wait_for / uri с самой ноды).
+# Проверяем локально через loopback, не завязываясь на внешний IP.
+healthcheck_local_host: "127.0.0.1"
+
+# Как долго apt-кэш считается свежим (сек) — не обновляем чаще.
+apt_cache_valid_time: 3600
+
+# Порты etcd — единый источник для endpoints, конфига ноды и проверок.
+#   client_port — клиентский API (Patroni, etcdctl)
+#   peer_port   — репликация между etcd-нодами (raft)
+etcd_client_port: 2379
+etcd_peer_port: 2380
+
+# IP-адреса etcd-нод (используются в конфиге Patroni и etcd).
+# Порты берём из etcd_client_port / etcd_peer_port, чтобы не дублировать.
 etcd_nodes:
   - name: etcd1
     ip: "172.20.0.11"
-    client_port: 2379
-    peer_port: 2380
+    client_port: "{{ etcd_client_port }}"
+    peer_port: "{{ etcd_peer_port }}"
   - name: etcd2
     ip: "172.20.0.12"
-    client_port: 2379
-    peer_port: 2380
+    client_port: "{{ etcd_client_port }}"
+    peer_port: "{{ etcd_peer_port }}"
   - name: etcd3
     ip: "172.20.0.13"
-    client_port: 2379
-    peer_port: 2380
+    client_port: "{{ etcd_client_port }}"
+    peer_port: "{{ etcd_peer_port }}"
 
-# Строка подключения к etcd-кластеру (используется в Patroni)
-etcd_endpoints: "http://172.20.0.11:2379,http://172.20.0.12:2379,http://172.20.0.13:2379"
+# Строка подключения к etcd-кластеру (используется в Patroni и etcdctl).
+# Строим из etcd_nodes, чтобы IP задавались в одном месте.
+etcd_endpoints: "{% for node in etcd_nodes %}http://{{ node.ip }}:{{ node.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
 
 # Пользователь и пароль PostgreSQL для репликации
 patroni_replication_user: "replicator"

@@ -39,7 +39,7 @@
     - name: "PRE | Обновляем кэш apt"
       apt:
         update_cache: true
-        cache_valid_time: 3600
+        cache_valid_time: "{{ apt_cache_valid_time }}"
 
     - name: "PRE | Информация о ноде"
       debug:
@@ -269,17 +269,17 @@
         state: started
         enabled: true
 
-    - name: "5.2 | Ждём пока Patroni поднимет PostgreSQL (порт 5432)"
+    - name: "5.2 | Ждём пока Patroni поднимет PostgreSQL (порт {{ postgresql_port }})"
       wait_for:
-        host: "127.0.0.1"
+        host: "{{ healthcheck_local_host }}"
         port: "{{ postgresql_port }}"
         timeout: 120
         state: started
         delay: 5
 
-    - name: "5.3 | Ждём пока Patroni REST API станет доступен (порт 8008)"
+    - name: "5.3 | Ждём пока Patroni REST API станет доступен (порт {{ patroni_api_port }})"
       wait_for:
-        host: "127.0.0.1"
+        host: "{{ healthcheck_local_host }}"
         port: "{{ patroni_api_port }}"
         timeout: 60
         state: started
@@ -337,7 +337,7 @@
     - name: "6.2 | Ждём завершения pg_basebackup (клонирование с primary)"
       # pg_basebackup копирует все данные с primary — может занять время
       wait_for:
-        host: "127.0.0.1"
+        host: "{{ healthcheck_local_host }}"
         port: "{{ postgresql_port }}"
         timeout: 300    # 5 минут — достаточно для небольшой базы
         state: started

@@ -24,7 +24,7 @@ name: {{ inventory_hostname }}
 # ----------------------------------------------------------
 restapi:
   # Слушаем на всех интерфейсах
-  listen: 0.0.0.0:{{ patroni_api_port }}
+  listen: {{ postgresql_listen_address }}:{{ patroni_api_port }}
   # Адрес, по которому другие ноды и балансировщики видят этот API
   connect_address: {{ patroni_node_ip }}:{{ patroni_api_port }}
 
@@ -138,9 +138,9 @@ bootstrap:
   # pg_hba.conf — правила аутентификации PostgreSQL
   pg_hba:
     # Репликация между нодами (pg1 ↔ pg2)
-    - host replication {{ patroni_replication_user }} {{ cluster_subnet }} md5
+    - host replication {{ patroni_replication_user }} {{ cluster_subnet }} {{ patroni_pg_hba_auth_method }}
     # Доступ приложений
-    - host all all 0.0.0.0/0 md5
+    - host all all {{ patroni_pg_hba_app_cidr }} {{ patroni_pg_hba_auth_method }}
     # Локальный доступ (для patronictl, healthcheck)
     - local all all trust
 
@@ -156,7 +156,7 @@ bootstrap:
 # ----------------------------------------------------------
 postgresql:
   # На каком адресе слушает PostgreSQL
-  listen: 0.0.0.0:{{ postgresql_port }}
+  listen: {{ postgresql_listen_address }}:{{ postgresql_port }}
 
   # Адрес, который Patroni передаёт в etcd для подключения других нод.
   # Важно: это должен быть реальный IP, не 0.0.0.0!
@@ -215,7 +215,7 @@ postgresql:
 # Для обучения отключаем.
 # ----------------------------------------------------------
 watchdog:
-  mode: off
+  mode: {{ patroni_watchdog_mode }}
 
 # ----------------------------------------------------------
 # Теги — метаданные ноды для маршрутизации запросов

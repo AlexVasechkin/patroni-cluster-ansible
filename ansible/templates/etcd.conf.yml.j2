@@ -23,23 +23,23 @@ data-dir: '{{ etcd_data_dir }}'
 
 # На каком адресе слушаем входящие peer-соединения.
 # 0.0.0.0 — принимаем со всех интерфейсов.
-listen-peer-urls: 'http://0.0.0.0:2380'
+listen-peer-urls: 'http://{{ etcd_listen_address }}:{{ etcd_peer_port }}'
 
 # Какой URL эта нода "объявляет" другим нодам кластера.
 # Должен быть реальным IP (не 0.0.0.0), т.к. другие ноды
 # будут подключаться именно по этому адресу.
-initial-advertise-peer-urls: 'http://{{ etcd_node_ip }}:2380'
+initial-advertise-peer-urls: 'http://{{ etcd_node_ip }}:{{ etcd_peer_port }}'
 
 # ----------------------------------------------------------
 # Client URLs — общение с клиентами (Patroni, etcdctl)
 # ----------------------------------------------------------
 
 # На каком адресе слушаем клиентские запросы.
-listen-client-urls: 'http://0.0.0.0:2379'
+listen-client-urls: 'http://{{ etcd_listen_address }}:{{ etcd_client_port }}'
 
 # URL, который эта нода объявляет клиентам.
 # Patroni будет подключаться именно по этому адресу.
-advertise-client-urls: 'http://{{ etcd_node_ip }}:2379'
+advertise-client-urls: 'http://{{ etcd_node_ip }}:{{ etcd_client_port }}'
 
 # ----------------------------------------------------------
 # Параметры инициализации кластера
@@ -51,7 +51,7 @@ advertise-client-urls: 'http://{{ etcd_node_ip }}:2379'
 
 # Уникальный токен кластера.
 # Защищает от случайного объединения разных кластеров.
-initial-cluster-token: 'patroni-etcd-cluster-01'
+initial-cluster-token: '{{ etcd_initial_cluster_token }}'
 
 # Список всех нод кластера при инициализации.
 # Формат: name=peer-url,name=peer-url,...
@@ -66,20 +66,20 @@ initial-cluster: >-
 
 # new    — создаём новый кластер (первый запуск)
 # existing — добавляем ноду в уже работающий кластер
-initial-cluster-state: 'new'
+initial-cluster-state: '{{ etcd_initial_cluster_state }}'
 
 # ----------------------------------------------------------
 # Настройки производительности (оставляем дефолт для обучения)
 # ----------------------------------------------------------
 
 # Интервал между heartbeat-сообщениями лидера (мс)
-heartbeat-interval: 100
+heartbeat-interval: {{ etcd_heartbeat_interval }}
 
 # Таймаут после которого follower инициирует выборы нового лидера (мс)
 # Должен быть в 5-10 раз больше heartbeat-interval
-election-timeout: 1000
+election-timeout: {{ etcd_election_timeout }}
 
 # ----------------------------------------------------------
 # Логирование
 # ----------------------------------------------------------
-log-level: 'info'
+log-level: '{{ etcd_log_level }}'

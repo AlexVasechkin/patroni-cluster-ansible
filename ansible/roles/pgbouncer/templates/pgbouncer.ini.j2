@@ -135,7 +135,7 @@ stats_period = {{ pgbouncer_stats_period }}
 ; Параметры сессии которые PgBouncer не должен передавать в PG.
 ; extra_float_digits часто устанавливается клиентами (JDBC и др.)
 ; и вызывает ошибки в transaction mode. Добавляем в ignore-список.
-ignore_startup_parameters = extra_float_digits,geqo,search_path
+ignore_startup_parameters = {{ pgbouncer_ignore_startup_parameters | join(',') }}
 
 ; PID файл не нужен при Type=simple в systemd
 ; pidfile = {{ pgbouncer_pid_file }}

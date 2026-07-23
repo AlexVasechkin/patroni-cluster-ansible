@@ -93,19 +93,19 @@
 
   tasks:
 
-    - name: "Заменяем md5 на scram-sha-256 в pg_hba.conf (host all)"
+    - name: "Заменяем {{ patroni_pg_hba_auth_method }} на {{ patroni_pg_hba_scram_method }} в pg_hba.conf (host all)"
       replace:
         path: "{{ postgresql_data_dir }}/pg_hba.conf"
-        regexp: '^(host\s+all\s+all\s+\S+)\s+md5$'
-        replace: '\1 scram-sha-256'
+        regexp: '^(host\s+all\s+all\s+\S+)\s+{{ patroni_pg_hba_auth_method }}$'
+        replace: '\1 {{ patroni_pg_hba_scram_method }}'
       register: pg_hba_changed
       notify: reload postgresql config
 
-    - name: "Заменяем md5 на scram-sha-256 в pg_hba.conf (host replication)"
+    - name: "Заменяем {{ patroni_pg_hba_auth_method }} на {{ patroni_pg_hba_scram_method }} в pg_hba.conf (host replication)"
       replace:
         path: "{{ postgresql_data_dir }}/pg_hba.conf"
-        regexp: '^(host\s+replication\s+\S+\s+\S+)\s+md5$'
-        replace: '\1 scram-sha-256'
+        regexp: '^(host\s+replication\s+\S+\s+\S+)\s+{{ patroni_pg_hba_auth_method }}$'
+        replace: '\1 {{ patroni_pg_hba_scram_method }}'
       notify: reload postgresql config
 
     - name: "Показываем обновлённый pg_hba.conf"

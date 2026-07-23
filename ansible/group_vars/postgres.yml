@@ -12,6 +12,28 @@ patroni_log_dir: "/var/log/patroni"
 postgresql_port: 5432
 # patroni_api_port перенесён в all.yml (нужен pgbouncer-скрипту)
 
+# Адрес, на котором слушают PostgreSQL и Patroni REST API.
+# 0.0.0.0 — все интерфейсы (advertise-адрес берётся из patroni_node_ip).
+postgresql_listen_address: "0.0.0.0"
+
+# ----------------------------------------------------------
+# pg_hba.conf — правила аутентификации при bootstrap
+# ----------------------------------------------------------
+# Метод аутентификации для host-правил. PG16 хранит пароли как
+# scram-sha-256; playbook 03 меняет md5 → scram-sha-256 после bootstrap.
+patroni_pg_hba_auth_method: "md5"
+# Сеть, из которой разрешён доступ приложений (host all all).
+patroni_pg_hba_app_cidr: "0.0.0.0/0"
+
+# Режим watchdog (аппаратная защита от split-brain).
+# off — для обучения; в production: automatic + softdog.
+patroni_watchdog_mode: "off"
+
+# Целевой метод аутентификации, на который playbook 03 переводит
+# pg_hba после bootstrap (PG16 хранит пароли как scram-sha-256,
+# несовместимо с pg_hba=md5).
+patroni_pg_hba_scram_method: "scram-sha-256"
+
 # Параметры PostgreSQL (можно переопределить для конкретного хоста)
 postgresql_max_connections: 100
 postgresql_shared_buffers: "256MB"

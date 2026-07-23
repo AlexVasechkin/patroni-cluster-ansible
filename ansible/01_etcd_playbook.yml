@@ -39,7 +39,7 @@
     - name: "PRE | Обновляем кэш apt"
       apt:
         update_cache: true
-        cache_valid_time: 3600  # не обновляем если кэш свежее 1 часа
+        cache_valid_time: "{{ apt_cache_valid_time }}"  # не обновляем если кэш свежее
 
     - name: "PRE | Устанавливаем вспомогательные пакеты"
       apt:
@@ -231,10 +231,10 @@
     # БЛОК 6: Проверка здоровья кластера
     # ==========================================================
 
-    - name: "6.1 | Ждём, пока etcd начнёт слушать порт 2379"
+    - name: "6.1 | Ждём, пока etcd начнёт слушать клиентский порт {{ etcd_client_port }}"
       wait_for:
-        host: "127.0.0.1"
-        port: 2379
+        host: "{{ healthcheck_local_host }}"
+        port: "{{ etcd_client_port }}"
         timeout: 60       # максимум ждём 60 секунд
         state: started
         delay: 3          # первая проверка через 3 секунды
@@ -242,7 +242,7 @@
     - name: "6.2 | Проверяем здоровье локального etcd endpoint"
       command: >
         {{ etcd_bin_dir }}/etcdctl
-        --endpoints=http://{{ etcd_node_ip }}:2379
+        --endpoints=http://{{ etcd_node_ip }}:{{ etcd_client_port }}
         endpoint health
       environment:
         ETCDCTL_API: "3"   # используем API v3 (v2 устарел)
