@@ -227,10 +227,13 @@
       slurp:
         src: "{{ patroni_config_dir }}/patroni.yml"
       register: patroni_config_content
+      # patroni.yml содержит пароли — не выводим его содержимое в лог.
+      no_log: true
 
     - name: "4.2 | Конфиг Patroni на {{ inventory_hostname }}"
       debug:
         msg: "{{ patroni_config_content.content | b64decode }}"
+      no_log: true
 
     - name: "4.3 | Создаём systemd unit для Patroni"
       template:
@@ -391,6 +394,8 @@
           environment:
             PGPASSWORD: "{{ patroni_superuser_password }}"
           changed_when: false
+          # PGPASSWORD в окружении — прячем таск из лога.
+          no_log: true
 
         - name: "Читаем данные с реплики (pg2) — проверяем streaming replication"
           command: >
@@ -407,6 +412,7 @@
           retries: 5
           delay: 2
           until: read_from_replica.rc == 0
+          no_log: true
 
         - name: "Результат чтения с реплики"
           debug:
@@ -422,3 +428,4 @@
           environment:
             PGPASSWORD: "{{ patroni_superuser_password }}"
           changed_when: false
+          no_log: true

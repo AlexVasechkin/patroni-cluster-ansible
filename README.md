@@ -131,13 +131,14 @@ ansible-playbook -i inventory.ini 05_pitr_demo_playbook.yml -e pitr_confirm=true
 | Файл                              | Что задаёт                                                        |
 |-----------------------------------|------------------------------------------------------------------|
 | `ansible/inventory.ini`           | Хосты, группы, SSH-параметры подключения.                        |
-| `ansible/group_vars/all.yml`      | Версии, имя кластера, сеть, ноды etcd/pg, порты, учётки, pgBackRest. |
+| `ansible/group_vars/all/vars.yml` | Версии, имя кластера, сеть, ноды etcd/pg, порты, учётки, pgBackRest. |
+| `ansible/group_vars/all/vault.yml`| Секреты (пароли), зашифровано ansible-vault.                      |
 | `ansible/group_vars/etcd.yml`     | Пути, порты, токен, тайминги Raft и логирование etcd.            |
 | `ansible/group_vars/postgres.yml` | Пути, порты, параметры PostgreSQL и Patroni, pg_hba, watchdog.   |
 | `ansible/host_vars/*.yml`         | IP каждого конкретного узла.                                     |
 | `ansible/roles/*/defaults/`       | Дефолты ролей PgBouncer и pgBackRest.                            |
 
-Ключевые параметры (`group_vars/all.yml`):
+Ключевые параметры (`group_vars/all/vars.yml`):
 
 ```yaml
 etcd_version: "3.5.13"
@@ -149,9 +150,120 @@ patroni_api_port: 8008
 pgbackrest_enabled: false       # true — поднимать кластер сразу с архивацией WAL
 ```
 
-> ⚠️ Пароли (`patroni_superuser_password`, `patroni_replication_password`) в
-> `group_vars/all.yml` заданы открытым текстом — это допустимо только для
-> учебного стенда. Для реального использования вынесите их в `ansible-vault`.
+### Секреты (ansible-vault)
+
+Пароли вынесены из репозитория в зашифрованный файл:
+
+- `ansible/group_vars/all/vars.yml` — несекретные переменные; пароли ссылаются
+  на `vault_*`.
+- `ansible/group_vars/all/vault.yml` — секреты (`vault_patroni_*_password`),
+  зашифрованы `ansible-vault`.
+- `ansible/.vault_pass` — файл с паролем от vault. **Не коммитится** (в
+  `.gitignore`); путь к нему прописан в `ansible/ansible.cfg`.
+
+```bash
+cd ansible
+ansible-vault view group_vars/all/vault.yml   # посмотреть секреты
+ansible-vault edit group_vars/all/vault.yml   # изменить
+ansible-vault rekey group_vars/all/vault.yml  # сменить пароль vault
+```
+
+При клонировании репозитория на новую машину положите пароль vault в
+`ansible/.vault_pass` (или запускайте плейбуки с `--ask-vault-pass`).
+
+> ⚠️ Значения паролей в стенде учебные. Смените их (`ansible-vault edit`) и
+> сгенерируйте новый `.vault_pass` перед любым реальным использованием.
+
+### Замена всех паролей для production
+
+Учебные пароли (`postgres_pass`, `replicator_pass`) и авто-сгенерированный
+`.vault_pass` **обязательно** заменить. Порядок зависит от того, разворачиваете
+вы кластер с нуля или меняете пароли на уже работающем.
+
+#### Шаг 1. Сгенерировать стойкие пароли
+
+```bash
+openssl rand -base64 24   # для суперпользователя
+openssl rand -base64 24   # для пользователя репликации
+```
+
+#### Шаг 2. Сменить пароль самого vault (`.vault_pass`)
+
+```bash
+cd ansible
+openssl rand -base64 32 > .vault_pass   # новый пароль vault (файл gitignored, mode 600)
+chmod 600 .vault_pass
+ansible-vault rekey group_vars/all/vault.yml   # перешифровать существующий файл
+```
+
+> `.vault_pass` не хранится в git. На каждой машине, откуда запускаются
+> плейбуки, положите его вручную или используйте `--ask-vault-pass`.
+
+#### Шаг 3. Записать новые пароли в vault
+
+```bash
+ansible-vault edit group_vars/all/vault.yml
+```
+
+Замените значения (кавычки обязательны, спецсимволы допустимы):
+
+```yaml
+vault_patroni_superuser_password:   "<новый-пароль-superuser>"
+vault_patroni_replication_password: "<новый-пароль-replication>"
+```
+
+Проверка, что всё расшифровывается и подставляется:
+
+```bash
+ansible localhost -m debug -a "var=patroni_superuser_password"
+```
+
+#### Шаг 4a. Развёртывание с нуля
+
+Если кластер ещё не создан — просто раскатайте плейбуки (`01 → 04`). Patroni
+задаст новые пароли при bootstrap, PgBouncer возьмёт их из vault. Больше делать
+ничего не нужно.
+
+#### Шаг 4b. Смена паролей на уже работающем кластере
+
+initdb выполняется один раз, поэтому смена пароля в vault **не** меняет пароли
+в уже созданной БД автоматически (секция `bootstrap.users` применяется только
+при создании кластера). Нужно применить их к живому кластеру вручную:
+
+```bash
+cd ansible
+
+# 1. Меняем пароли ролей в PostgreSQL (выполнять на текущем primary).
+#    Роль реплики — та же, что в vault (по умолчанию replicator).
+docker exec -it pg1 psql -U postgres -c \
+  "ALTER ROLE postgres   WITH PASSWORD '<новый-пароль-superuser>';"
+docker exec -it pg1 psql -U postgres -c \
+  "ALTER ROLE replicator WITH PASSWORD '<новый-пароль-replication>';"
+
+# 2. Перегенерируем patroni.yml из vault (пароли для pg_rewind/basebackup).
+ansible-playbook 02_patroni_playbook.yml
+
+# 3. Перегенерируем userlist.txt PgBouncer из vault и делаем reload.
+ansible-playbook 03_pgbouncer_playbook.yml --tags configure
+```
+
+После смены пароля репликации проверьте, что реплика не отвалилась:
+
+```bash
+docker exec -it pg1 patronictl -c /etc/patroni/patroni.yml list
+```
+
+#### Шаг 5. Прочие секреты (для реального production)
+
+Помимо паролей БД смените и остальные учётные данные из лабораторного стенда:
+
+- **SSH-ключ Ansible** — `ssh/id_rsa` генерируется `setup.sh`; для prod
+  используйте свой управляемый ключ, не общий на весь кластер.
+- **Шифрование репозитория pgBackRest** — включите `pgbackrest_cipher_type:
+  aes-256-cbc` + `repo1-cipher-pass` (тоже в vault). См. раздел 2 в
+  `prod-plan.todo`.
+- **TLS-сертификаты** etcd / PostgreSQL / Patroni REST — раздел 2 в
+  `prod-plan.todo`.
 
 ---
 

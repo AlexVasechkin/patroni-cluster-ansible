@@ -212,6 +212,8 @@
         PGPASSWORD: "{{ patroni_superuser_password }}"
       register: archiver_stat
       changed_when: false
+      # PGPASSWORD в окружении — прячем таск из лога.
+      no_log: true
 
     - name: "5.2 | pg_stat_archiver"
       debug:

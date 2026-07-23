@@ -17,6 +17,8 @@
   register: pg_via_pgbouncer
   # Модуль community.postgresql может быть не установлен — используем psql
   ignore_errors: true
+  # login_password в параметрах — прячем таск из лога.
+  no_log: true
 
 # Fallback: psql с явными флагами (избегаем проблем с multiline строкой подключения)
 - name: "Проверяем подключение через PgBouncer (через psql)"
@@ -37,6 +39,7 @@
     PGPASSWORD: "{{ patroni_superuser_password }}"
   register: psql_via_pgbouncer
   changed_when: false
+  no_log: true
 
 - name: "Результат подключения через PgBouncer"
   debug:
@@ -60,6 +63,7 @@
     PGPASSWORD: "{{ patroni_superuser_password }}"
   register: pgbouncer_pools
   changed_when: false
+  no_log: true
 
 - name: "Пулы PgBouncer (SHOW POOLS)"
   debug:
@@ -83,6 +87,7 @@
     PGPASSWORD: "{{ patroni_superuser_password }}"
   register: pgbouncer_servers
   changed_when: false
+  no_log: true
 
 - name: "Серверные соединения PgBouncer (SHOW SERVERS)"
   debug:

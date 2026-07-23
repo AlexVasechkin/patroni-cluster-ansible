@@ -1,5 +1,8 @@
 # ============================================================
-# Переменные, общие для всех хостов
+# Переменные, общие для всех хостов (НЕсекретные).
+#
+# Секреты вынесены в vault.yml (ansible-vault) и подставляются сюда
+# через vault_*-переменные — см. patroni_*_password ниже.
 # ============================================================
 
 # Версия etcd для установки
@@ -47,13 +50,15 @@ etcd_nodes:
 # Строим из etcd_nodes, чтобы IP задавались в одном месте.
 etcd_endpoints: "{% for node in etcd_nodes %}http://{{ node.ip }}:{{ node.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
 
-# Пользователь и пароль PostgreSQL для репликации
+# Пользователь и пароль PostgreSQL для репликации.
+# Пароль хранится в vault.yml (vault_patroni_replication_password).
 patroni_replication_user: "replicator"
-patroni_replication_password: "replicator_pass"
+patroni_replication_password: "{{ vault_patroni_replication_password }}"
 
-# Суперпользователь PostgreSQL
+# Суперпользователь PostgreSQL.
+# Пароль хранится в vault.yml (vault_patroni_superuser_password).
 patroni_superuser: "postgres"
-patroni_superuser_password: "postgres_pass"
+patroni_superuser_password: "{{ vault_patroni_superuser_password }}"
 
 # Порт Patroni REST API — используется и postgres-нодами и pgbouncer-скриптом
 patroni_api_port: 8008
