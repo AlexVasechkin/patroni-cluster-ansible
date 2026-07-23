@@ -177,14 +177,18 @@
         # (у etcd нет встроенного validate, поэтому пропускаем)
       notify: restart etcd
 
+    # Дамп конфига — только для отладки. В штатном прогоне пропускается;
+    # запустить явно: ansible-playbook 01_etcd_playbook.yml --tags debug
     - name: "3.2 | Показываем сгенерированный конфиг (для отладки)"
       slurp:
         src: "{{ etcd_config_dir }}/etcd.conf.yml"
       register: etcd_config_content
+      tags: [never, debug]
 
     - name: "3.2 | Содержимое конфига на {{ inventory_hostname }}"
       debug:
         msg: "{{ etcd_config_content.content | b64decode }}"
+      tags: [never, debug]
 
     # ==========================================================
     # БЛОК 4: Systemd unit файл

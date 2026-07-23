@@ -156,8 +156,8 @@ pgbackrest_enabled: false       # true — поднимать кластер с�
 
 - `ansible/group_vars/all/vars.yml` — несекретные переменные; пароли ссылаются
   на `vault_*`.
-- `ansible/group_vars/all/vault.yml` — секреты (`vault_patroni_*_password`),
-  зашифрованы `ansible-vault`.
+- `ansible/group_vars/all/vault.yml` — секреты (`vault_patroni_*_password`,
+  `vault_pgbouncer_auth_password`), зашифрованы `ansible-vault`.
 - `ansible/.vault_pass` — файл с паролем от vault. **Не коммитится** (в
   `.gitignore`); путь к нему прописан в `ansible/ansible.cfg`.
 
@@ -170,6 +170,13 @@ ansible-vault rekey group_vars/all/vault.yml  # сменить пароль vaul
 
 При клонировании репозитория на новую машину положите пароль vault в
 `ansible/.vault_pass` (или запускайте плейбуки с `--ask-vault-pass`).
+
+**PgBouncer / auth_query.** По умолчанию PgBouncer работает в режиме
+`auth_query`: пароли приложений **не** хранятся в `userlist.txt`. Плейбук 03
+создаёт на primary ограниченную роль `pgbouncer_auth` и SECURITY DEFINER
+функцию `pgbouncer.user_lookup()`, а PgBouncer запрашивает SCRAM-verifier
+клиента на лету. В `userlist.txt` остаётся только сама роль `pgbouncer_auth`.
+Отключить (вернуть пароли в файл) — `pgbouncer_auth_query_enabled: false`.
 
 > ⚠️ Значения паролей в стенде учебные. Смените их (`ansible-vault edit`) и
 > сгенерируйте новый `.vault_pass` перед любым реальным использованием.

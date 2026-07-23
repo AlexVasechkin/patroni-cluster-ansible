@@ -78,7 +78,11 @@ RUN mkdir -p /var/run/sshd && \
 # Создаём пользователя ansible (от его имени будет работать Ansible)
 # -----------------------------------------------------------
 RUN useradd -m -s /bin/bash ansible && \
-    # Беспарольный sudo — нужен для установки пакетов через Ansible
+    # Беспарольный sudo — нужен для установки пакетов и управления systemd
+    # через Ansible на всех нодах (провижнинг требует широкого root, поэтому
+    # ограничение набора команд ломает become). Это осознанный выбор для
+    # контейнерного стенда; в production sudo ужесточается вместе с уходом
+    # от Docker-субстрата — см. раздел 3 в prod-plan.todo.
     echo 'ansible ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/ansible && \
     chmod 440 /etc/sudoers.d/ansible && \
     mkdir -p /home/ansible/.ssh && \

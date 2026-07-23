@@ -63,6 +63,21 @@ patroni_superuser_password: "{{ vault_patroni_superuser_password }}"
 # Порт Patroni REST API — используется и postgres-нодами и pgbouncer-скриптом
 patroni_api_port: 8008
 
+# ----------------------------------------------------------
+# PgBouncer auth_query — общие переменные.
+# Нужны и роли pgbouncer (хост pgbouncer1), и плейбуку 03 (PLAY 1.6 создаёт
+# роль pgbouncer_auth + функцию user_lookup на pg1, вне контекста роли),
+# поэтому живут в group_vars/all, а не в defaults роли.
+# ----------------------------------------------------------
+# true (по умолчанию) — пароли приложений НЕ хранятся в userlist.txt,
+# PgBouncer получает SCRAM-verifier клиента через auth_query.
+# false — fallback: пароли пользователей пишутся в userlist.txt.
+pgbouncer_auth_query_enabled: true
+# Ограниченная роль, под которой PgBouncer выполняет auth_query.
+pgbouncer_auth_user: "pgbouncer_auth"
+# Пароль роли — из ansible-vault (group_vars/all/vault.yml).
+pgbouncer_auth_password: "{{ vault_pgbouncer_auth_password }}"
+
 # PostgreSQL-ноды кластера (используются в скрипте pgbouncer-update-primary.sh
 # и в конфиге pgBackRest на репозиторном хосте — pgN-host)
 patroni_nodes:

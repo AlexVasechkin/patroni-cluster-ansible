@@ -89,8 +89,22 @@ pgbouncer_auth_type: "scram-sha-256"
 # Путь к файлу с пользователями и хэшами паролей
 pgbouncer_auth_file: "/etc/pgbouncer/userlist.txt"
 
-# Список пользователей, которым разрешён доступ
-# Пароли хранятся как MD5-хэш: md5(password + username)
+# ----------------------------------------------------------
+# auth_query — production-режим аутентификации
+#
+# Общие переменные auth_query (pgbouncer_auth_query_enabled/_user/_password)
+# заданы в group_vars/all/vars.yml — они нужны не только этой роли, но и
+# плейбуку 03 (PLAY 1.6 создаёт роль/функцию на pg1, вне контекста роли).
+# Здесь оставлены только детали рендеринга конфига PgBouncer.
+#
+# SQL для получения (username, password_hash). Возвращает поля функции
+# pgbouncer.user_lookup: uname, phash.
+pgbouncer_auth_query: "SELECT uname, phash FROM pgbouncer.user_lookup($1)"
+# База, в которой PgBouncer выполняет auth_query (в ней живёт функция).
+pgbouncer_auth_dbname: "postgres"
+
+# Список пользователей для userlist.txt — используется ТОЛЬКО когда
+# pgbouncer_auth_query_enabled: false (fallback без auth_query).
 pgbouncer_users:
   - username: "{{ patroni_superuser }}"
     password: "{{ patroni_superuser_password }}"

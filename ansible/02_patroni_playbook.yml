@@ -223,17 +223,21 @@
         group: postgres
         mode: "0640"
 
+    # Дамп конфига — только для отладки (содержит пароли, поэтому no_log).
+    # В штатном прогоне пропускается; запустить явно: --tags debug
     - name: "4.2 | Показываем сгенерированный конфиг"
       slurp:
         src: "{{ patroni_config_dir }}/patroni.yml"
       register: patroni_config_content
       # patroni.yml содержит пароли — не выводим его содержимое в лог.
       no_log: true
+      tags: [never, debug]
 
     - name: "4.2 | Конфиг Patroni на {{ inventory_hostname }}"
       debug:
         msg: "{{ patroni_config_content.content | b64decode }}"
       no_log: true
+      tags: [never, debug]
 
     - name: "4.3 | Создаём systemd unit для Patroni"
       template:

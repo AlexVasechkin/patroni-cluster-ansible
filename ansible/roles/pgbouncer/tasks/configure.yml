@@ -41,21 +41,23 @@
   slurp:
     src: "{{ pgbouncer_config_dir }}/pgbouncer.ini"
   register: pgbouncer_ini_content
+  tags: [never, debug]
 
 - name: "Содержимое pgbouncer.ini"
   debug:
     msg: "{{ pgbouncer_ini_content.content | b64decode }}"
+  tags: [never, debug]
 
 # ----------------------------------------------------------
 # Файл аутентификации — userlist.txt
 #
-# Формат строки: "username" "md5<hex>"
-# Где <hex> = md5(password + username) — пароль + имя слитно.
+# Формат строки: "username" "password"  (кавычки обязательны, # НЕ допускаются
+# как комментарии — иначе "broken auth file" и SASL-сбои).
 #
-# Почему MD5, а не plaintext:
-#   userlist.txt может прочитать любой процесс от pgbouncer.
-#   MD5 — минимальная защита; в production используйте scram-sha-256
-#   или auth_query для запроса паролей напрямую из pg_shadow.
+# При pgbouncer_auth_query_enabled=true (по умолчанию) в файле лежит ТОЛЬКО
+# роль pgbouncer_auth: пароли приложений PgBouncer получает через auth_query
+# (pgbouncer.user_lookup) — см. PLAY 1.6 плейбука 03.
+# При false — в файле пароли всех pgbouncer_users (fallback-режим).
 # ----------------------------------------------------------
 - name: "Генерируем userlist.txt"
   template:
@@ -66,7 +68,7 @@
     # 0600 — только pgbouncer читает, пароли не должны утечь
     mode: "0600"
   notify: reload pgbouncer
-  # Шаблон содержит пароли пользователей — не выводим diff/содержимое в лог.
+  # Шаблон содержит пароль(и) — не выводим diff/содержимое в лог.
   no_log: true
 
 # ----------------------------------------------------------

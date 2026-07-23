@@ -1,3 +1,7 @@
+{% if pgbouncer_auth_query_enabled | default(true) %}
+"{{ pgbouncer_auth_user }}" "{{ pgbouncer_auth_password }}"
+{% else %}
 {% for user in pgbouncer_users %}
 "{{ user.username }}" "{{ user.password }}"
 {% endfor %}
+{% endif %}

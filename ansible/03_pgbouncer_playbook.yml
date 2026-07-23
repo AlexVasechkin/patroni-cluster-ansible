@@ -126,6 +126,76 @@
 
 
 # ==============================================================
+# PLAY 1.6: auth_query — роль pgbouncer_auth + функция user_lookup
+#
+# Для production-режима PgBouncer (auth_query) пароли приложений НЕ хранятся
+# в userlist.txt. Вместо этого PgBouncer под ограниченной ролью pgbouncer_auth
+# запрашивает SCRAM-verifier клиента через SECURITY DEFINER функцию
+# pgbouncer.user_lookup(). Создаём их на primary — реплицируются на реплику
+# через WAL (роли/объекты общие для кластера).
+#
+# Отключается флагом pgbouncer_auth_query_enabled: false (тогда этот play
+# пропускается, а userlist.txt снова содержит пароли пользователей).
+# ==============================================================
+- name: "PLAY 1.6 | auth_query: роль pgbouncer_auth и функция user_lookup"
+  hosts: pg1
+  become: true
+  become_user: postgres
+  tasks:
+
+    # SQL подаётся через stdin (не -c): psql интерполирует :'pw' только при
+    # чтении из потока/файла, а -c переменные не подставляет. Так пароль не
+    # попадает ни в argv процесса, ни в текст SQL.
+    - name: "1.6.1 | Создаём/обновляем ограниченную роль {{ pgbouncer_auth_user }}"
+      command:
+        argv:
+          - psql
+          - -d
+          - postgres
+          - -v
+          - "ON_ERROR_STOP=1"
+          - -v
+          - "pw={{ pgbouncer_auth_password }}"
+        stdin: |
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '{{ pgbouncer_auth_user }}') THEN
+              CREATE ROLE {{ pgbouncer_auth_user }} LOGIN;
+            END IF;
+          END $$;
+          ALTER ROLE {{ pgbouncer_auth_user }} WITH LOGIN PASSWORD :'pw';
+      register: auth_role_result
+      changed_when: false
+      # Пароль передаётся через psql-переменную — прячем таск из лога.
+      no_log: true
+      when: pgbouncer_auth_query_enabled | default(true)
+
+    - name: "1.6.2 | Создаём схему pgbouncer и SECURITY DEFINER функцию user_lookup"
+      command:
+        argv:
+          - psql
+          - -d
+          - postgres
+          - -v
+          - "ON_ERROR_STOP=1"
+        stdin: |
+          CREATE SCHEMA IF NOT EXISTS pgbouncer AUTHORIZATION postgres;
+          CREATE OR REPLACE FUNCTION pgbouncer.user_lookup(
+              IN i_username text, OUT uname text, OUT phash text)
+            RETURNS record AS $$
+          BEGIN
+            SELECT usename, passwd FROM pg_catalog.pg_shadow
+             WHERE usename = i_username INTO uname, phash;
+            RETURN;
+          END;
+          $$ LANGUAGE plpgsql SECURITY DEFINER;
+          REVOKE ALL ON FUNCTION pgbouncer.user_lookup(text) FROM PUBLIC;
+          GRANT USAGE ON SCHEMA pgbouncer TO {{ pgbouncer_auth_user }};
+          GRANT EXECUTE ON FUNCTION pgbouncer.user_lookup(text) TO {{ pgbouncer_auth_user }};
+      changed_when: false
+      when: pgbouncer_auth_query_enabled | default(true)
+
+
+# ==============================================================
 # PLAY 2: Установка и настройка PgBouncer
 # ==============================================================
 - name: "PLAY 2 | Установка и настройка PgBouncer"

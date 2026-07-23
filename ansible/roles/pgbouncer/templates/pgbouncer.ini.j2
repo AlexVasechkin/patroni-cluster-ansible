@@ -52,6 +52,15 @@ listen_port = {{ pgbouncer_listen_port }}
 ; ----------------------------------------------------------
 auth_type = {{ pgbouncer_auth_type }}
 auth_file = {{ pgbouncer_auth_file }}
+{% if pgbouncer_auth_query_enabled | default(true) %}
+; auth_query: пароли приложений НЕ хранятся в userlist.txt. PgBouncer
+; подключается к auth_dbname под ролью auth_user и запрашивает SCRAM-verifier
+; клиента через SECURITY DEFINER функцию pgbouncer.user_lookup() (создаётся
+; плейбуком 03 на primary). В userlist.txt лежит только auth_user.
+auth_user = {{ pgbouncer_auth_user }}
+auth_dbname = {{ pgbouncer_auth_dbname }}
+auth_query = {{ pgbouncer_auth_query }}
+{% endif %}
 
 ; ----------------------------------------------------------
 ; Pool mode
