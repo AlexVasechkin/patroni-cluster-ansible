@@ -36,13 +36,17 @@ restapi:
 #   Секция `etcd3:` использует gRPC/v3 API через библиотеку etcd3.
 # ----------------------------------------------------------
 etcd3:
-  # Список всех etcd endpoint'ов через запятую.
-  # Patroni сам переключится на живой если один упадёт.
-  hosts: >-
-    {% for node in etcd_nodes -%}
-    {{ node.ip }}:{{ node.client_port }}
-    {%- if not loop.last %},{% endif %}
-    {%- endfor %}
+  # Список всех etcd endpoint'ов через запятую (host:port, без схемы —
+  # схема задаётся ниже через protocol). Однострочный scalar намеренно:
+  # folded '>-' склеивал бы следующие строки в значение при trim_blocks.
+  hosts: "{% for node in etcd_nodes %}{{ node.ip }}:{{ node.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+{% if etcd_tls_enabled %}
+  # Mutual TLS: ходим в etcd по https и предъявляем клиентский серт.
+  protocol: https
+  cacert: {{ patroni_etcd_ca_cert }}
+  cert: {{ patroni_etcd_client_cert }}
+  key: {{ patroni_etcd_client_key }}
+{% endif %}
 
 # ----------------------------------------------------------
 # Bootstrap — выполняется ОДИН РАЗ на primary при initdb.

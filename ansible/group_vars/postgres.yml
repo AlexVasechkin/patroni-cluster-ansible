@@ -8,6 +8,14 @@ postgresql_config_dir: "/etc/postgresql/{{ postgresql_version }}/main"
 patroni_config_dir: "/etc/patroni"
 patroni_log_dir: "/var/log/patroni"
 
+# TLS-сертификаты для подключения Patroni к etcd по https (mutual TLS).
+# ca.crt + общий client.* раздаёт playbook 02 из локального etcd_pki_dir.
+# Активны только при etcd_tls_enabled (all.yml).
+patroni_etcd_cert_dir: "/etc/patroni/certs"
+patroni_etcd_ca_cert: "{{ patroni_etcd_cert_dir }}/ca.crt"
+patroni_etcd_client_cert: "{{ patroni_etcd_cert_dir }}/client.crt"
+patroni_etcd_client_key: "{{ patroni_etcd_cert_dir }}/client.key"
+
 # Порты
 postgresql_port: 5432
 # patroni_api_port перенесён в all.yml (нужен pgbouncer-скрипту)

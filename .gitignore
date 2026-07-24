@@ -10,5 +10,8 @@ ansible/*.retry
 # Пароль ansible-vault — никогда не коммитить!
 ansible/.vault_pass
 
+# PKI etcd (CA + приватные ключи сертификатов) — не коммитить!
+ansible/certs/
+
 # macOS
 .DS_Store

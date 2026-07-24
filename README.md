@@ -138,7 +138,7 @@ ansible-playbook -i inventory.ini 05_pitr_demo_playbook.yml -e pitr_confirm=true
 | `ansible/inventory.ini`           | Хосты, группы, SSH-параметры подключения.                        |
 | `ansible/group_vars/all/vars.yml` | Версии, имя кластера, сеть, ноды etcd/pg, порты, учётки, pgBackRest. |
 | `ansible/group_vars/all/vault.yml`| Секреты (пароли), зашифровано ansible-vault.                      |
-| `ansible/group_vars/etcd.yml`     | Пути, порты, токен, тайминги Raft и логирование etcd.            |
+| `ansible/group_vars/etcd.yml`     | Пути, токен, тайминги Raft, TLS-серты, production-тюнинг etcd.    |
 | `ansible/group_vars/postgres.yml` | Пути, порты, параметры PostgreSQL и Patroni, pg_hba, watchdog.   |
 | `ansible/host_vars/*.yml`         | IP каждого конкретного узла.                                     |
 | `ansible/roles/*/defaults/`       | Дефолты ролей PgBouncer и pgBackRest.                            |
@@ -185,6 +185,144 @@ ansible-vault rekey group_vars/all/vault.yml  # сменить пароль vaul
 
 > ⚠️ Значения паролей в стенде учебные. Смените их (`ansible-vault edit`) и
 > сгенерируйте новый `.vault_pass` перед любым реальным использованием.
+
+### etcd TLS (mutual)
+
+etcd работает поверх TLS со **взаимной аутентификацией** (`client-cert-auth: true`):
+шифруются и peer-канал (raft между нодами), и client-канал; каждый клиент
+(Patroni, `etcdctl`) обязан предъявить сертификат, подписанный нашим CA. RBAC
+(`etcd auth enable`) сознательно не включён — доверенным считается любой клиент с
+валидным сертификатом. Переключатель — `etcd_tls_enabled` в
+`group_vars/all/vars.yml` (по умолчанию `true`); при `false` весь стенд работает
+по `http://`.
+
+**PKI генерируется автоматически.** PLAY 0 плейбука `01` (на control-node, через
+`community.crypto`, идемпотентно) создаёт самоподписанный CA и сертификаты в
+`ansible/certs/`. Каталог **не коммитится** (приватные ключи, в `.gitignore`);
+CA-ключ с control-node не покидает.
+
+| Сертификат | Кол-во | Назначение | Key Usage (EKU) |
+|------------|--------|------------|-----------------|
+| `ca`             | 1          | корневой CA                 | keyCertSign          |
+| `<node>-server`  | по ноде    | клиентский канал etcd       | serverAuth + **clientAuth** |
+| `<node>-peer`    | по ноде    | межнодовый канал (raft)     | serverAuth + clientAuth |
+| `client`         | 1 (общий)  | Patroni и `etcdctl`         | clientAuth           |
+
+> ⚠️ Server-сертификат **обязан** иметь и `serverAuth`, и `clientAuth`:
+> grpc-gateway etcd проксирует REST `/v3` во внутренний gRPC по loopback,
+> используя server-серт как клиентский. Без `clientAuth` `/v3` не работает и
+> Patroni виснет на `waiting on etcd`. SAN server-сертов: IP ноды, `127.0.0.1`,
+> `localhost`, hostname.
+
+**Раскладка на нодах:**
+
+- etcd-ноды `/etc/etcd/certs/`: `ca.crt`, `<node>-server.*`, `<node>-peer.*`,
+  `client.*` (последний — для локального `etcdctl`). Раздаёт плейбук `01`.
+- pg-ноды `/etc/patroni/certs/`: `ca.crt`, `client.*` (для etcd3-секции Patroni:
+  `protocol: https` + `cacert`/`cert`/`key`). Раздаёт плейбук `02`.
+
+> Смена `etcd_tls_enabled` требует **свежего bootstrap etcd** — членство кластера
+> хранит схему peer-URL, «на лету» http↔https не переключается. Пересоздайте
+> etcd-контейнеры и прогоните `01`→`02`.
+
+**Проверка TLS:**
+
+```bash
+# healthy — с сертификатом по https
+docker exec etcd1 etcdctl --cacert=/etc/etcd/certs/ca.crt \
+  --cert=/etc/etcd/certs/client.crt --key=/etc/etcd/certs/client.key \
+  --endpoints=https://172.20.0.11:2379 endpoint health
+
+# отклоняется — без сертификата или по http
+docker exec etcd1 etcdctl --endpoints=http://172.20.0.11:2379 endpoint health
+
+# цепочка сертификата до нашего CA
+docker exec etcd1 sh -c \
+  'echo | openssl s_client -connect 172.20.0.11:2379 -CAfile /etc/etcd/certs/ca.crt 2>/dev/null | grep -E "subject=|issuer=|Verify"'
+```
+
+Помимо TLS плейбук `01` включает базовый **production-тюнинг** etcd
+(`group_vars/etcd.yml`): авто-компакция ревизий, `quota-backend-bytes`,
+`snapshot-count`, метрики Prometheus (`/metrics`).
+
+#### Срок действия и обновление сертификатов
+
+Срок действия задаётся `etcd_cert_valid_days` (`group_vars/all/vars.yml`, по
+умолчанию **3650 дней ≈ 10 лет**) — одинаково для CA и всех leaf-сертов, отсчёт от
+момента генерации. Когда сертификат протухает, etcd отклоняет соединения
+(`certificate has expired`), и кластер/Patroni теряют DCS. Обновлять нужно
+**заранее**.
+
+**Как отследить протухание.** Дата окончания и проверка «истекает ли в ближайшие
+N дней» (`openssl x509 -checkend` возвращает ненулевой код, если да):
+
+```bash
+# дата окончания конкретного серта
+docker exec etcd1 openssl x509 -enddate -noout -in /etc/etcd/certs/etcd1-server.crt
+
+# все серты на ноде разом + флаг «истекает < 30 дней»
+docker exec etcd1 sh -c '
+for f in /etc/etcd/certs/*.crt; do
+  end=$(openssl x509 -enddate -noout -in "$f" | cut -d= -f2)
+  if openssl x509 -checkend $((30*86400)) -noout -in "$f" >/dev/null; then st=OK; else st="!!! <30d"; fi
+  printf "%-40s %s  %s\n" "$(basename "$f")" "$end" "$st"
+done'
+
+# срок «по проводу», как его видит клиент
+echo | openssl s_client -connect 172.20.0.11:2379 2>/dev/null | openssl x509 -noout -enddate
+```
+
+Для мониторинга: тот же `openssl x509 -checkend <секунды>` в cron/Prometheus-textfile
+на каждой ноде, либо экспортер (`blackbox_exporter` умеет `ssl_earliest_cert_expiry`
+по TCP-эндпоинту `172.20.0.1x:2379`).
+
+**Ручное обновление одного серта (без Ansible).** Подписываем нашим CA — его ключ
+лежит на control-node в `ansible/certs/ca.key`. Пример для server-серта `etcd1`
+(приватный ключ переиспользуем):
+
+```bash
+cd ansible/certs
+NODE=etcd1; IP=172.20.0.11
+
+# extfile: SAN + EKU. Для SERVER обязательны serverAuth И clientAuth
+# (иначе сломается grpc-gateway /v3 — см. предупреждение выше).
+cat > ${NODE}-server.ext <<EOF
+subjectAltName = IP:${IP}, IP:127.0.0.1, DNS:localhost, DNS:${NODE}
+extendedKeyUsage = serverAuth, clientAuth
+keyUsage = digitalSignature, keyEncipherment
+EOF
+
+# новый CSR по существующему ключу и подпись CA на новый срок
+openssl req -new -key ${NODE}-server.key -subj "/CN=${NODE}" -out ${NODE}-server.csr
+openssl x509 -req -in ${NODE}-server.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
+  -days 825 -extfile ${NODE}-server.ext -out ${NODE}-server.crt
+
+# доставка на ноду + перезапуск (data-dir не трогаем, членство сохраняется)
+docker cp ${NODE}-server.crt ${NODE}:/etc/etcd/certs/${NODE}-server.crt
+docker exec ${NODE} chown etcd:etcd /etc/etcd/certs/${NODE}-server.crt
+docker exec ${NODE} systemctl restart etcd
+docker exec ${NODE} etcdctl --cacert=/etc/etcd/certs/ca.crt \
+  --cert=/etc/etcd/certs/client.crt --key=/etc/etcd/certs/client.key \
+  --endpoints=https://${IP}:2379 endpoint health   # проверка
+```
+
+Отличия для остальных типов:
+
+- **peer-серт** (`<node>-peer.crt`): тот же extfile (SAN без `localhost`, EKU
+  `serverAuth, clientAuth`), после замены — `systemctl restart etcd`. Обновляйте
+  ноды по очереди (rolling), дожидаясь `endpoint health` перед следующей.
+- **client-серт** (`client.crt`, общий): EKU только `clientAuth`, SAN не нужен.
+  Копируется в `/etc/etcd/certs/` на etcd-ноды (для etcdctl) **и** в
+  `/etc/patroni/certs/` на pg-ноды; на pg-нодах после замены — `chown postgres` и
+  `systemctl restart patroni`.
+- **CA (`ca.crt`)**: истечение CA — это пересоздание всей PKI (переподписать все
+  leaf-серты новым CA и разложить `ca.crt` повсюду). Проще прогнать заново
+  `01`→`02` на свежем bootstrap.
+
+> Альтернатива вручную: удалить нужные `.crt` в `ansible/certs/` и повторно
+> прогнать плейбук `01` (и `02` для Patroni) — `community.crypto` перевыпустит их
+> тем же CA. Идемпотентная генерация сама по себе **не** продлевает серт при
+> приближении срока — нужно удалить старый файл.
 
 ### Замена всех паролей для production
 

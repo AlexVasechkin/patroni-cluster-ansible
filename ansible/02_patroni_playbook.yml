@@ -166,6 +166,38 @@
       # Эта директория нужна всегда — создаём безусловно
 
     # ==========================================================
+    # БЛОК 2b: TLS-сертификаты для подключения Patroni к etcd
+    #
+    # Раздаём CA + общий client-серт (из etcd_pki_dir на control-node,
+    # сгенерирован PLAY 0 плейбука 01). Нужны, т.к. etcd работает в режиме
+    # mutual TLS. Блок пропускается при etcd_tls_enabled=false.
+    # ==========================================================
+    - name: "2b | Раздаём etcd-сертификаты для Patroni"
+      when: etcd_tls_enabled
+      block:
+        - name: "2b.1 | Каталог сертификатов {{ patroni_etcd_cert_dir }}"
+          file:
+            path: "{{ patroni_etcd_cert_dir }}"
+            state: directory
+            owner: postgres
+            group: postgres
+            mode: "0750"
+
+        - name: "2b.2 | Копируем CA и client-серт на pg-ноду"
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            owner: postgres
+            group: postgres
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ etcd_pki_dir }}/ca.crt", dest: "{{ patroni_etcd_ca_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/client.crt", dest: "{{ patroni_etcd_client_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/client.key", dest: "{{ patroni_etcd_client_key }}", mode: "0600" }
+          loop_control:
+            label: "{{ item.dest }}"
+
+    # ==========================================================
     # БЛОК 3: Установка Patroni
     #
     # Patroni устанавливаем через pip (не через apt),

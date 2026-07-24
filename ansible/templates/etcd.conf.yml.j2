@@ -23,23 +23,23 @@ data-dir: '{{ etcd_data_dir }}'
 
 # На каком адресе слушаем входящие peer-соединения.
 # 0.0.0.0 — принимаем со всех интерфейсов.
-listen-peer-urls: 'http://{{ etcd_listen_address }}:{{ etcd_peer_port }}'
+listen-peer-urls: '{{ etcd_scheme }}://{{ etcd_listen_address }}:{{ etcd_peer_port }}'
 
 # Какой URL эта нода "объявляет" другим нодам кластера.
 # Должен быть реальным IP (не 0.0.0.0), т.к. другие ноды
 # будут подключаться именно по этому адресу.
-initial-advertise-peer-urls: 'http://{{ etcd_node_ip }}:{{ etcd_peer_port }}'
+initial-advertise-peer-urls: '{{ etcd_scheme }}://{{ etcd_node_ip }}:{{ etcd_peer_port }}'
 
 # ----------------------------------------------------------
 # Client URLs — общение с клиентами (Patroni, etcdctl)
 # ----------------------------------------------------------
 
 # На каком адресе слушаем клиентские запросы.
-listen-client-urls: 'http://{{ etcd_listen_address }}:{{ etcd_client_port }}'
+listen-client-urls: '{{ etcd_scheme }}://{{ etcd_listen_address }}:{{ etcd_client_port }}'
 
 # URL, который эта нода объявляет клиентам.
 # Patroni будет подключаться именно по этому адресу.
-advertise-client-urls: 'http://{{ etcd_node_ip }}:{{ etcd_client_port }}'
+advertise-client-urls: '{{ etcd_scheme }}://{{ etcd_node_ip }}:{{ etcd_client_port }}'
 
 # ----------------------------------------------------------
 # Параметры инициализации кластера
@@ -60,7 +60,7 @@ initial-cluster-token: '{{ etcd_initial_cluster_token }}'
 #   etcd1=http://172.20.0.11:2380,etcd2=http://172.20.0.12:2380,...
 initial-cluster: >-
   {% for node in etcd_nodes -%}
-  {{ node.name }}=http://{{ node.ip }}:{{ node.peer_port }}
+  {{ node.name }}={{ etcd_scheme }}://{{ node.ip }}:{{ node.peer_port }}
   {%- if not loop.last %},{% endif %}
   {%- endfor %}
 
@@ -78,6 +78,44 @@ heartbeat-interval: {{ etcd_heartbeat_interval }}
 # Таймаут после которого follower инициирует выборы нового лидера (мс)
 # Должен быть в 5-10 раз больше heartbeat-interval
 election-timeout: {{ etcd_election_timeout }}
+
+{% if etcd_tls_enabled %}
+# ----------------------------------------------------------
+# TLS (mutual)
+#
+# peer-transport-security   — шифрование и взаимная аутентификация между
+#                             etcd-нодами (raft). client-cert-auth=true —
+#                             нода принимает только серты, подписанные нашим CA.
+# client-transport-security — то же для клиентов (Patroni, etcdctl): каждый
+#                             клиент обязан предъявить серт от нашего CA.
+# ----------------------------------------------------------
+peer-transport-security:
+  cert-file: '{{ etcd_peer_cert }}'
+  key-file: '{{ etcd_peer_key }}'
+  client-cert-auth: true
+  trusted-ca-file: '{{ etcd_ca_cert }}'
+  auto-tls: false
+
+client-transport-security:
+  cert-file: '{{ etcd_server_cert }}'
+  key-file: '{{ etcd_server_key }}'
+  client-cert-auth: true
+  trusted-ca-file: '{{ etcd_ca_cert }}'
+  auto-tls: false
+{% endif %}
+
+# ----------------------------------------------------------
+# Production-тюнинг
+# ----------------------------------------------------------
+# Автокомпакция истории ревизий — ограничивает рост backend-БД.
+auto-compaction-mode: '{{ etcd_auto_compaction_mode }}'
+auto-compaction-retention: '{{ etcd_auto_compaction_retention }}'
+# Лимит размера backend-БД (байты).
+quota-backend-bytes: {{ etcd_quota_backend_bytes }}
+# Порог транзакций между снапшотами.
+snapshot-count: {{ etcd_snapshot_count }}
+# Уровень метрик Prometheus (/metrics на клиентском порту).
+metrics: '{{ etcd_metrics }}'
 
 # ----------------------------------------------------------
 # Логирование

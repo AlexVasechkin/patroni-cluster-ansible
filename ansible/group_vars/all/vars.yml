@@ -30,6 +30,22 @@ apt_cache_valid_time: 3600
 etcd_client_port: 2379
 etcd_peer_port: 2380
 
+# ----------------------------------------------------------
+# etcd TLS (mutual). Единый переключатель http↔https для всего стенда:
+# etcd-конфиг, endpoints, etcdctl и etcd3-секция Patroni читают этот флаг.
+# ВНИМАНИЕ: смена значения требует свежего bootstrap etcd (peer-членство
+# хранит старую схему URL) — пересоздать etcd-контейнеры.
+# ----------------------------------------------------------
+etcd_tls_enabled: true
+etcd_scheme: "{{ 'https' if etcd_tls_enabled else 'http' }}"
+
+# Локальный каталог PKI на control-node (сюда playbook 01 генерирует CA и
+# сертификаты; приватные ключи в .gitignore). playbook_dir = ansible/.
+etcd_pki_dir: "{{ playbook_dir }}/certs"
+# Срок действия и размер ключа выпускаемых сертификатов.
+etcd_cert_valid_days: 3650
+etcd_cert_key_size: 2048
+
 # IP-адреса etcd-нод (используются в конфиге Patroni и etcd).
 # Порты берём из etcd_client_port / etcd_peer_port, чтобы не дублировать.
 etcd_nodes:
@@ -47,8 +63,8 @@ etcd_nodes:
     peer_port: "{{ etcd_peer_port }}"
 
 # Строка подключения к etcd-кластеру (используется в Patroni и etcdctl).
-# Строим из etcd_nodes, чтобы IP задавались в одном месте.
-etcd_endpoints: "{% for node in etcd_nodes %}http://{{ node.ip }}:{{ node.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
+# Строим из etcd_nodes, чтобы IP задавались в одном месте. Схема — из etcd_scheme.
+etcd_endpoints: "{% for node in etcd_nodes %}{{ etcd_scheme }}://{{ node.ip }}:{{ node.client_port }}{% if not loop.last %},{% endif %}{% endfor %}"
 
 # Пользователь и пароль PostgreSQL для репликации.
 # Пароль хранится в vault.yml (vault_patroni_replication_password).

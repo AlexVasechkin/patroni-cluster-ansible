@@ -25,6 +25,183 @@
 #   половина нод + 1, то есть 2 из 3.
 # ============================================================
 
+# ==============================================================
+# PLAY 0: PKI — генерация CA и сертификатов на control-node
+#
+# Выполняется локально (hosts: localhost). Идемпотентно: community.crypto
+# перевыпускает файлы только при отсутствии/несоответствии. Приватные ключи
+# остаются на control-node (etcd_pki_dir, в .gitignore); на ноды раздаются
+# нужные сертификаты плейбуками 01 (etcd) и 02 (Patroni-клиент).
+#
+# Весь блок пропускается при etcd_tls_enabled=false.
+# ==============================================================
+- name: "PLAY 0 | PKI: CA + сертификаты etcd (mutual TLS)"
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    - name: "PKI | CA и сертификаты etcd"
+      when: etcd_tls_enabled
+      block:
+
+        - name: "0.1 | Каталог PKI на control-node"
+          file:
+            path: "{{ etcd_pki_dir }}"
+            state: directory
+            mode: "0700"
+
+        # --- Корневой CA ---
+        - name: "0.2 | Приватный ключ CA"
+          community.crypto.openssl_privatekey:
+            path: "{{ etcd_pki_dir }}/ca.key"
+            size: "{{ etcd_cert_key_size }}"
+            mode: "0600"
+
+        - name: "0.3 | CSR для CA"
+          community.crypto.openssl_csr:
+            path: "{{ etcd_pki_dir }}/ca.csr"
+            privatekey_path: "{{ etcd_pki_dir }}/ca.key"
+            common_name: "etcd-ca"
+            basic_constraints:
+              - "CA:TRUE"
+            basic_constraints_critical: true
+            key_usage:
+              - keyCertSign
+              - cRLSign
+              - digitalSignature
+            key_usage_critical: true
+
+        - name: "0.4 | Самоподписанный сертификат CA"
+          community.crypto.x509_certificate:
+            path: "{{ etcd_pki_dir }}/ca.crt"
+            csr_path: "{{ etcd_pki_dir }}/ca.csr"
+            privatekey_path: "{{ etcd_pki_dir }}/ca.key"
+            provider: selfsigned
+            selfsigned_not_after: "+{{ etcd_cert_valid_days }}d"
+            mode: "0644"
+
+        # --- Server-сертификаты нод (клиентский канал) ---
+        - name: "0.5 | Приватные ключи server-сертов"
+          community.crypto.openssl_privatekey:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-server.key"
+            size: "{{ etcd_cert_key_size }}"
+            mode: "0600"
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "0.6 | CSR server-сертов (SAN: IP ноды, 127.0.0.1, localhost, hostname)"
+          community.crypto.openssl_csr:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-server.csr"
+            privatekey_path: "{{ etcd_pki_dir }}/{{ item.name }}-server.key"
+            common_name: "{{ item.name }}"
+            subject_alt_name:
+              - "IP:{{ item.ip }}"
+              - "IP:127.0.0.1"
+              - "DNS:localhost"
+              - "DNS:{{ item.name }}"
+            key_usage:
+              - digitalSignature
+              - keyEncipherment
+            # serverAuth + clientAuth: grpc-gateway etcd проксирует REST /v3 во
+            # внутренний gRPC по loopback, используя server-серт как КЛИЕНТСКИЙ.
+            # Без clientAuth /v3 отдаёт "incompatible key usage" → Patroni timeout.
+            extended_key_usage:
+              - serverAuth
+              - clientAuth
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "0.7 | Server-сертификаты (подписаны CA)"
+          community.crypto.x509_certificate:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-server.crt"
+            csr_path: "{{ etcd_pki_dir }}/{{ item.name }}-server.csr"
+            provider: ownca
+            ownca_path: "{{ etcd_pki_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ etcd_pki_dir }}/ca.key"
+            ownca_not_after: "+{{ etcd_cert_valid_days }}d"
+            mode: "0644"
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # --- Peer-сертификаты нод (межнодовый канал, server+client auth) ---
+        - name: "0.8 | Приватные ключи peer-сертов"
+          community.crypto.openssl_privatekey:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-peer.key"
+            size: "{{ etcd_cert_key_size }}"
+            mode: "0600"
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "0.9 | CSR peer-сертов"
+          community.crypto.openssl_csr:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-peer.csr"
+            privatekey_path: "{{ etcd_pki_dir }}/{{ item.name }}-peer.key"
+            common_name: "{{ item.name }}"
+            subject_alt_name:
+              - "IP:{{ item.ip }}"
+              - "IP:127.0.0.1"
+              - "DNS:{{ item.name }}"
+            key_usage:
+              - digitalSignature
+              - keyEncipherment
+            extended_key_usage:
+              - serverAuth
+              - clientAuth
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        - name: "0.10 | Peer-сертификаты (подписаны CA)"
+          community.crypto.x509_certificate:
+            path: "{{ etcd_pki_dir }}/{{ item.name }}-peer.crt"
+            csr_path: "{{ etcd_pki_dir }}/{{ item.name }}-peer.csr"
+            provider: ownca
+            ownca_path: "{{ etcd_pki_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ etcd_pki_dir }}/ca.key"
+            ownca_not_after: "+{{ etcd_cert_valid_days }}d"
+            mode: "0644"
+          loop: "{{ etcd_nodes }}"
+          loop_control:
+            label: "{{ item.name }}"
+
+        # --- Общий client-сертификат (Patroni + etcdctl) ---
+        - name: "0.11 | Приватный ключ client-серта"
+          community.crypto.openssl_privatekey:
+            path: "{{ etcd_pki_dir }}/client.key"
+            size: "{{ etcd_cert_key_size }}"
+            mode: "0600"
+
+        - name: "0.12 | CSR client-серта"
+          community.crypto.openssl_csr:
+            path: "{{ etcd_pki_dir }}/client.csr"
+            privatekey_path: "{{ etcd_pki_dir }}/client.key"
+            common_name: "etcd-client"
+            key_usage:
+              - digitalSignature
+              - keyEncipherment
+            extended_key_usage:
+              - clientAuth
+
+        - name: "0.13 | Client-сертификат (подписан CA)"
+          community.crypto.x509_certificate:
+            path: "{{ etcd_pki_dir }}/client.crt"
+            csr_path: "{{ etcd_pki_dir }}/client.csr"
+            provider: ownca
+            ownca_path: "{{ etcd_pki_dir }}/ca.crt"
+            ownca_privatekey_path: "{{ etcd_pki_dir }}/ca.key"
+            ownca_not_after: "+{{ etcd_cert_valid_days }}d"
+            mode: "0644"
+
+
+# ==============================================================
+# PLAY 1: Установка и настройка etcd
+# ==============================================================
 - name: "Установка и настройка etcd кластера"
   hosts: etcd
   become: true
@@ -154,6 +331,44 @@
         msg: "{{ etcd_version_check.stdout_lines[0] }}"
 
     # ==========================================================
+    # БЛОК 2b: TLS-сертификаты (mutual TLS)
+    #
+    # Раздаём на ноду: CA, её server- и peer-серты, и общий client-серт
+    # (нужен локальному etcdctl). Приватные ключи 0600, owner etcd.
+    # Сертификаты сгенерированы в PLAY 0 на control-node (etcd_pki_dir).
+    # Блок целиком пропускается при etcd_tls_enabled=false.
+    # ==========================================================
+    - name: "2b | Раздаём TLS-сертификаты etcd на ноду"
+      when: etcd_tls_enabled
+      block:
+        - name: "2b.1 | Каталог сертификатов {{ etcd_cert_dir }}"
+          file:
+            path: "{{ etcd_cert_dir }}"
+            state: directory
+            owner: "{{ etcd_user }}"
+            group: "{{ etcd_group }}"
+            mode: "0750"
+
+        - name: "2b.2 | Копируем сертификаты и ключи на ноду"
+          copy:
+            src: "{{ item.src }}"
+            dest: "{{ item.dest }}"
+            owner: "{{ etcd_user }}"
+            group: "{{ etcd_group }}"
+            mode: "{{ item.mode }}"
+          loop:
+            - { src: "{{ etcd_pki_dir }}/ca.crt", dest: "{{ etcd_ca_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/{{ inventory_hostname }}-server.crt", dest: "{{ etcd_server_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/{{ inventory_hostname }}-server.key", dest: "{{ etcd_server_key }}", mode: "0600" }
+            - { src: "{{ etcd_pki_dir }}/{{ inventory_hostname }}-peer.crt", dest: "{{ etcd_peer_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/{{ inventory_hostname }}-peer.key", dest: "{{ etcd_peer_key }}", mode: "0600" }
+            - { src: "{{ etcd_pki_dir }}/client.crt", dest: "{{ etcd_client_cert }}", mode: "0644" }
+            - { src: "{{ etcd_pki_dir }}/client.key", dest: "{{ etcd_client_key }}", mode: "0600" }
+          loop_control:
+            label: "{{ item.dest }}"
+          notify: restart etcd
+
+    # ==========================================================
     # БЛОК 3: Конфигурация etcd
     #
     # Каждая нода получает свой конфиг на основе одного шаблона.
@@ -246,10 +461,9 @@
     - name: "6.2 | Проверяем здоровье локального etcd endpoint"
       command: >
         {{ etcd_bin_dir }}/etcdctl
-        --endpoints=http://{{ etcd_node_ip }}:{{ etcd_client_port }}
+        --endpoints={{ etcd_scheme }}://{{ etcd_node_ip }}:{{ etcd_client_port }}
         endpoint health
-      environment:
-        ETCDCTL_API: "3"   # используем API v3 (v2 устарел)
+      environment: "{{ etcd_ctl_env }}"
       register: etcd_health
       changed_when: false
       retries: 5           # повторяем до 5 раз если кластер ещё не выбрал лидера
@@ -268,8 +482,7 @@
         {{ etcd_bin_dir }}/etcdctl
         --endpoints={{ etcd_endpoints }}
         member list --write-out=table
-      environment:
-        ETCDCTL_API: "3"
+      environment: "{{ etcd_ctl_env }}"
       register: etcd_members
       changed_when: false
       run_once: true   # выполняем только на первой ноде из группы
@@ -284,8 +497,7 @@
         {{ etcd_bin_dir }}/etcdctl
         --endpoints={{ etcd_endpoints }}
         endpoint status --write-out=table
-      environment:
-        ETCDCTL_API: "3"
+      environment: "{{ etcd_ctl_env }}"
       register: etcd_status
       changed_when: false
       run_once: true
@@ -302,8 +514,7 @@
             {{ etcd_bin_dir }}/etcdctl
             --endpoints={{ etcd_endpoints }}
             put /patroni/test "etcd-cluster-ok"
-          environment:
-            ETCDCTL_API: "3"
+          environment: "{{ etcd_ctl_env }}"
           changed_when: false
 
         - name: "Читаем тестовый ключ из etcd"
@@ -311,8 +522,7 @@
             {{ etcd_bin_dir }}/etcdctl
             --endpoints={{ etcd_endpoints }}
             get /patroni/test
-          environment:
-            ETCDCTL_API: "3"
+          environment: "{{ etcd_ctl_env }}"
           register: etcd_test_read
           changed_when: false
 
@@ -325,8 +535,7 @@
             {{ etcd_bin_dir }}/etcdctl
             --endpoints={{ etcd_endpoints }}
             del /patroni/test
-          environment:
-            ETCDCTL_API: "3"
+          environment: "{{ etcd_ctl_env }}"
           changed_when: false
 
       run_once: true   # весь block выполняем один раз

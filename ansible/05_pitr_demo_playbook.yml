@@ -148,10 +148,9 @@
     - name: "3.1 | etcdctl del --prefix /service/{{ patroni_cluster_name }}"
       command: >-
         {{ etcd_bin_dir }}/etcdctl
-        --endpoints=http://{{ etcd_node_ip }}:{{ etcd_client_port }}
+        --endpoints={{ etcd_scheme }}://{{ etcd_node_ip }}:{{ etcd_client_port }}
         del --prefix /service/{{ patroni_cluster_name }}
-      environment:
-        ETCDCTL_API: "3"
+      environment: "{{ etcd_ctl_env }}"
       register: etcd_del
       changed_when: true
 

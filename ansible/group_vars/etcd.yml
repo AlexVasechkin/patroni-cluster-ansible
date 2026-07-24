@@ -40,3 +40,40 @@ etcd_heartbeat_interval: 100
 etcd_election_timeout: 1000
 # Уровень логирования etcd.
 etcd_log_level: "info"
+
+# ----------------------------------------------------------
+# TLS (mutual) — сертификаты на etcd-ноде
+# Раздаёт playbook 01 из локального etcd_pki_dir. Флаг — etcd_tls_enabled (all).
+#   server — клиентский канал (для Patroni/etcdctl)
+#   peer   — межнодовый канал (raft), server+client auth
+#   client — клиентский серт для локального etcdctl на самой ноде
+# ----------------------------------------------------------
+etcd_cert_dir: "/etc/etcd/certs"
+etcd_ca_cert: "{{ etcd_cert_dir }}/ca.crt"
+etcd_server_cert: "{{ etcd_cert_dir }}/{{ inventory_hostname }}-server.crt"
+etcd_server_key: "{{ etcd_cert_dir }}/{{ inventory_hostname }}-server.key"
+etcd_peer_cert: "{{ etcd_cert_dir }}/{{ inventory_hostname }}-peer.crt"
+etcd_peer_key: "{{ etcd_cert_dir }}/{{ inventory_hostname }}-peer.key"
+etcd_client_cert: "{{ etcd_cert_dir }}/client.crt"
+etcd_client_key: "{{ etcd_cert_dir }}/client.key"
+
+# Окружение для etcdctl: API v3 + (при TLS) cert-флаги через ETCDCTL_*.
+# Используется во всех etcdctl-тасках плейбуков 01/05.
+etcd_ctl_env: >-
+  {{ {'ETCDCTL_API': '3'} | combine(
+       {'ETCDCTL_CACERT': etcd_ca_cert,
+        'ETCDCTL_CERT': etcd_client_cert,
+        'ETCDCTL_KEY': etcd_client_key} if etcd_tls_enabled else {}) }}
+
+# ----------------------------------------------------------
+# Production-тюнинг
+# ----------------------------------------------------------
+# Автокомпакция истории ревизий — иначе backend-БД растёт бесконечно.
+etcd_auto_compaction_mode: "periodic"
+etcd_auto_compaction_retention: "1"    # часов
+# Лимит размера backend-БД; при превышении etcd поднимает alarm и уходит в RO.
+etcd_quota_backend_bytes: 8589934592   # 8 GiB
+# Порог числа транзакций между снапшотами WAL.
+etcd_snapshot_count: 10000
+# Уровень метрик Prometheus на /metrics клиентского порта (basic|extensive).
+etcd_metrics: "basic"
