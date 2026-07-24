@@ -78,8 +78,21 @@ patroni_ignore_slots:
   - name: my_slot
     type: logical
 
-# Параметры Patroni
-patroni_ttl: 30
-patroni_loop_wait: 10
-patroni_retry_timeout: 30
+# ----------------------------------------------------------
+# Параметры Patroni (DCS timing) — управляют скоростью failover.
+#
+# Два ограничения Patroni:
+#   1) ttl >= 20               — жёсткий минимум (меньше Patroni зажимает до 20).
+#   2) ttl >= loop_wait + 2*retry_timeout  — иначе транзиентная задержка etcd
+#      дольше ttl уронит лидерский ключ → ложный failover.
+# Рекомендуется также retry_timeout >= loop_wait.
+#
+# 20/5/5 — минимально быстрый failover, который разрешает Patroni:
+#   обнаружение отказа лидера за ~ttl (20s), цикл раз в 5s,
+#   запас по правилу 2: 20 >= 5 + 2*5 = 15 (5s слака под задержки etcd).
+# Для нестабильной сети — увеличивайте ttl (напр. 30/10/10).
+# ----------------------------------------------------------
+patroni_ttl: 20
+patroni_loop_wait: 5
+patroni_retry_timeout: 5
 patroni_maximum_lag_on_failover: 1048576  # 1MB

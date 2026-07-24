@@ -100,8 +100,8 @@ bootstrap:
     # Каждые loop_wait секунд Patroni проверяет состояние кластера.
     loop_wait: {{ patroni_loop_wait }}
 
-    # Таймаут на операции с etcd.
-    # Должен быть >= loop_wait.
+    # Таймаут на операции с etcd. Должен быть >= loop_wait И удовлетворять
+    # ttl >= loop_wait + 2*retry_timeout (иначе Patroni зажмёт значения).
     retry_timeout: {{ patroni_retry_timeout }}
 
     # Максимальное отставание реплики при failover (байты).
