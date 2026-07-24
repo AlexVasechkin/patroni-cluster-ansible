@@ -475,6 +475,24 @@ docker exec -it pg2 patronictl -c /etc/patroni/patroni.yml list
 docker exec -it pgbouncer1 /usr/local/bin/pgbouncer-update-primary.sh
 ```
 
+**DCS-тайминги (скорость failover).** Заданы в `group_vars/postgres.yml`, хранятся
+в DCS (`bootstrap.dcs`). Стенд настроен на быстрый failover:
+
+| Параметр        | Значение | Смысл                                                        |
+|-----------------|----------|--------------------------------------------------------------|
+| `ttl`           | `20`     | TTL лидерского ключа в etcd; лидер теряется за ~`ttl` без обновления. |
+| `loop_wait`     | `5`      | период главного цикла Patroni.                               |
+| `retry_timeout` | `5`      | таймаут операций к etcd.                                      |
+
+Patroni требует `ttl >= 20` **и** `ttl >= loop_wait + 2*retry_timeout`
+(здесь `20 >= 5 + 2*5 = 15`); рекомендуется также `retry_timeout >= loop_wait`.
+Меньший `ttl` ускоряет обнаружение отказа лидера (~20 c вместо 30), но повышает
+риск ложного failover при сетевых задержках etcd — для нестабильной сети берите
+`30/10/10`.
+
+> Тайминги живут в DCS (общие для кластера) — меняйте их через
+> `patronictl edit-config`, а не reload'ом отдельных нод.
+
 **Бэкапы (pgBackRest, на узле backup1):**
 
 ```bash
