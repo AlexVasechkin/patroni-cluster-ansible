@@ -1,12 +1,19 @@
-# Patroni Cluster — учебный стенд HA PostgreSQL
+# Patroni Cluster — production-ready HA PostgreSQL
 
-Учебный проект по развёртыванию отказоустойчивого кластера PostgreSQL на базе
-**Patroni + etcd**, с пулингом соединений через **PgBouncer** и резервным
-копированием / PITR через **pgBackRest**.
+Отказоустойчивый **production-ready** кластер PostgreSQL 16 на базе
+**Patroni + etcd**: автоматический failover, streaming-репликация (1 primary +
+2 реплики), пулинг соединений через **PgBouncer** и резервное копирование / PITR
+через **pgBackRest**. Конфигурация раскатывается через Ansible и полностью
+вынесена в переменные — хардкода в плейбуках нет.
 
-Вся инфраструктура поднимается в Docker-контейнерах (Ubuntu 24.04 + systemd),
-а конфигурация раскатывается через Ansible. Стенд рассчитан на локальный запуск
-и изучение — не для production.
+Безопасность из коробки: сквозной **mutual TLS** для etcd (peer + client-каналы),
+секреты в **ansible-vault**, PgBouncer в режиме **auth_query** (пароли приложений
+не хранятся на хосте), **basic-auth** на Patroni REST API, согласованные под
+быстрый failover тайминги.
+
+Инфраструктура описана в Docker Compose (Ubuntu 24.04 + systemd) для локального
+запуска и CI; для боевого развёртывания те же плейбуки применяются к реальным
+хостам/VM — замените `inventory.ini` и IP в `host_vars/`.
 
 ---
 
@@ -184,8 +191,8 @@ ansible-vault rekey group_vars/all/vault.yml  # сменить пароль vaul
 клиента на лету. В `userlist.txt` остаётся только сама роль `pgbouncer_auth`.
 Отключить (вернуть пароли в файл) — `pgbouncer_auth_query_enabled: false`.
 
-> ⚠️ Значения паролей в стенде учебные. Смените их (`ansible-vault edit`) и
-> сгенерируйте новый `.vault_pass` перед любым реальным использованием.
+> ⚠️ Пароли в репозитории — дефолтные заглушки. Обязательно смените их
+> (`ansible-vault edit`) и сгенерируйте новый `.vault_pass` перед деплоем.
 
 ### etcd TLS (mutual)
 
@@ -194,7 +201,7 @@ etcd работает поверх TLS со **взаимной аутентиф�
 (Patroni, `etcdctl`) обязан предъявить сертификат, подписанный нашим CA. RBAC
 (`etcd auth enable`) сознательно не включён — доверенным считается любой клиент с
 валидным сертификатом. Переключатель — `etcd_tls_enabled` в
-`group_vars/all/vars.yml` (по умолчанию `true`); при `false` весь стенд работает
+`group_vars/all/vars.yml` (по умолчанию `true`); при `false` весь кластер работает
 по `http://`.
 
 **PKI генерируется автоматически.** PLAY 0 плейбука `01` (на control-node, через
@@ -361,7 +368,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -XPOST \
 
 ### Замена всех паролей для production
 
-Учебные пароли (`postgres_pass`, `replicator_pass`) и авто-сгенерированный
+Дефолтные пароли-заглушки (`postgres_pass`, `replicator_pass`) и авто-сгенерированный
 `.vault_pass` **обязательно** заменить. Порядок зависит от того, разворачиваете
 вы кластер с нуля или меняете пароли на уже работающем.
 
@@ -440,7 +447,7 @@ docker exec -it pg1 patronictl -c /etc/patroni/patroni.yml list
 
 #### Шаг 5. Прочие секреты (для реального production)
 
-Помимо паролей БД смените и остальные учётные данные из лабораторного стенда:
+Помимо паролей БД смените и остальные дефолтные учётные данные:
 
 - **SSH-ключ Ansible** — `ssh/id_rsa` генерируется `setup.sh`; для prod
   используйте свой управляемый ключ, не общий на весь кластер.
@@ -476,7 +483,7 @@ docker exec -it pgbouncer1 /usr/local/bin/pgbouncer-update-primary.sh
 ```
 
 **DCS-тайминги (скорость failover).** Заданы в `group_vars/postgres.yml`, хранятся
-в DCS (`bootstrap.dcs`). Стенд настроен на быстрый failover:
+в DCS (`bootstrap.dcs`). Кластер настроен на быстрый failover:
 
 | Параметр        | Значение | Смысл                                                        |
 |-----------------|----------|--------------------------------------------------------------|
@@ -502,7 +509,7 @@ docker exec -it backup1 /usr/local/bin/pgbackrest-backup.sh full   # full | diff
 
 ---
 
-## Управление стендом
+## Управление кластером
 
 ```bash
 docker compose ps                 # статус контейнеров
@@ -522,7 +529,7 @@ docker compose logs -f pg1        # логи узла
 ```
 .
 ├── Dockerfile              # базовый образ узла (Ubuntu 24.04 + systemd + SSH)
-├── docker-compose.yml      # топология: 3× etcd, 2× pg, pgbouncer, backup
+├── docker-compose.yml      # топология: 3× etcd, 3× pg, pgbouncer, backup
 ├── setup.sh                # генерация ключей + сборка + запуск контейнеров
 ├── ssh/                    # SSH-ключи для Ansible (приватный не коммитится)
 ├── ansible/
@@ -541,9 +548,14 @@ docker compose logs -f pg1        # логи узла
 
 ## Примечания
 
-- Стенд учебный: watchdog отключён, TLS не используется, пароли в открытом виде.
-- Контейнеры запускаются с `privileged: true` и смонтированным `cgroup` — это
-  необходимо, чтобы внутри работал systemd.
+- Безопасность: секреты в ansible-vault, etcd под mutual TLS, Patroni REST API
+  под basic-auth, PgBouncer в режиме auth_query. Дальнейшие шаги усиления под
+  конкретное окружение (TLS на REST API, offsite-шифрование бэкапов, HAProxy/VIP,
+  watchdog, мониторинг, RBAC в etcd) отслеживаются в `prod-plan.todo`.
+- watchdog Patroni по умолчанию отключён (`patroni_watchdog_mode: "off"`); для
+  аппаратной защиты от split-brain включите `softdog`.
+- Контейнеры запускаются с `privileged: true` и смонтированным `cgroup` — нужно
+  для работы systemd внутри контейнера (при деплое на реальные хосты/VM не требуется).
 - Порядок запуска плейбуков важен: `01 → 02 → 03 → 04`. Плейбук `05` — отдельная
-  разрушающая демонстрация PITR.
+  разрушающая процедура PITR (восстановление на точку во времени).
 ```
