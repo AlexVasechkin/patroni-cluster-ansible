@@ -7,6 +7,7 @@
 #   etcd3  172.20.0.13  — etcd node 3
 #   pg1    172.20.0.21  — PostgreSQL / Patroni (будущий primary)
 #   pg2    172.20.0.22  — PostgreSQL / Patroni (будущий replica)
+#   pg3    172.20.0.23  — PostgreSQL / Patroni (будущий replica)
 #
 # Все контейнеры собраны из одного Dockerfile (Ubuntu 24.04 + systemd + SSH).
 # Ansible подключается к ним по SSH с хост-машины через проброшенные порты.
@@ -132,6 +133,24 @@ services:
       # Patroni REST API реплики
       - "8009:8008"
 
+  pg3:
+    <<: *node-common
+    container_name: pg3
+    hostname: pg3
+    networks:
+      patroni-net:
+        ipv4_address: 172.20.0.23
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+      # Данные PostgreSQL второй реплики
+      - pg3-data:/var/lib/postgresql
+    ports:
+      - "2228:22"
+      # Вторая реплика доступна на отдельном порту хоста
+      - "5434:5432"
+      # Patroni REST API второй реплики
+      - "8010:8008"
+
   # ----------------------------------------------------------
   # PGBOUNCER — connection pooler
   # Принимает клиентские подключения и перенаправляет их на
@@ -192,6 +211,8 @@ volumes:
     name: patroni_pg1_data
   pg2-data:
     name: patroni_pg2_data
+  pg3-data:
+    name: patroni_pg3_data
   # Репозиторий бэкапов pgBackRest (переживает docker-compose down)
   backup-repo:
     name: patroni_backup_repo

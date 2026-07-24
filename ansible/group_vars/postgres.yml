@@ -37,11 +37,30 @@ patroni_pg_hba_scram_method: "scram-sha-256"
 # Параметры PostgreSQL (можно переопределить для конкретного хоста)
 postgresql_max_connections: 100
 postgresql_shared_buffers: "256MB"
-postgresql_wal_level: "replica"
+# logical — нужно для логической репликации и logical decoding on standby
+# (создание логического слота на реплике). Смена уровня требует РЕСТАРТА.
+postgresql_wal_level: "logical"
 postgresql_max_wal_senders: 10
 postgresql_max_replication_slots: 10
 postgresql_hot_standby: "on"
+# Реплика сообщает primary свой xmin, чтобы vacuum не удалял ещё нужные
+# строки (в т.ч. catalog-строки). Без этого логический слот на standby
+# инвалидируется (conflicting=true). Применяется reload'ом.
+postgresql_hot_standby_feedback: "on"
 postgresql_wal_log_hints: "on"
+
+# ----------------------------------------------------------
+# Слоты, которыми Patroni НЕ управляет (ignore_slots).
+# Ручной логический слот на реплике (logical decoding on standby) не входит
+# в набор слотов Patroni, и при реконсиляции (в т.ч. при смене лидера)
+# Patroni может его дропнуть. Записи ниже защищают такие слоты: слот
+# считается совпавшим, если совпали ВСЕ указанные атрибуты (name/type/
+# database/plugin), незаданные — wildcard. Тут матчим по name+type, чтобы
+# не завязываться на имя БД.
+# ----------------------------------------------------------
+patroni_ignore_slots:
+  - name: my_slot
+    type: logical
 
 # Параметры Patroni
 patroni_ttl: 30

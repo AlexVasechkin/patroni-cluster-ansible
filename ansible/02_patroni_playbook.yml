@@ -7,7 +7,7 @@
 #
 # Структура playbook'а (3 play):
 #
-#   PLAY 1 [postgres] — Установка и конфигурация (параллельно на обоих нодах)
+#   PLAY 1 [postgres] — Установка и конфигурация (параллельно на всех нодах)
 #     Устанавливаем PostgreSQL 16, Patroni, создаём конфиги.
 #     Patroni ещё НЕ запускаем.
 #
@@ -15,9 +15,9 @@
 #     Запускаем Patroni на pg1. Он делает initdb и становится primary.
 #     Ждём пока он получит роль leader в etcd.
 #
-#   PLAY 3 [pg2] — Подключение реплики
-#     Запускаем Patroni на pg2. Он видит в etcd что pg1 — лидер,
-#     делает pg_basebackup с pg1 и поднимается как replica.
+#   PLAY 3 [postgres:!pg1] — Подключение реплик
+#     Запускаем Patroni на всех репликах (pg2, pg3, ...). Каждая видит
+#     в etcd что pg1 — лидер, делает pg_basebackup и поднимается как replica.
 #
 # Почему такой порядок?
 #   Если запустить обе ноды одновременно, обе начнут конкурировать
@@ -324,18 +324,19 @@
 
 
 # ==============================================================
-# PLAY 3: Подключение реплики (только pg2)
+# PLAY 3: Подключение реплик (все ноды [postgres], кроме pg1)
 #
-# pg2 видит в etcd что pg1 — лидер → выполняет pg_basebackup
-# с pg1 → поднимается в режиме hot standby.
+# Каждая реплика видит в etcd что pg1 — лидер → выполняет
+# pg_basebackup с лидера → поднимается в режиме hot standby.
+# Таргет postgres:!pg1 охватывает pg2, pg3 и любые будущие реплики.
 # ==============================================================
-- name: "PLAY 3 | Подключение реплики (pg2)"
-  hosts: pg2
+- name: "PLAY 3 | Подключение реплик"
+  hosts: postgres:!pg1
   become: true
 
   tasks:
 
-    - name: "6.1 | Запускаем Patroni на pg2 (реплика)"
+    - name: "6.1 | Запускаем Patroni на реплике ({{ inventory_hostname }})"
       systemd:
         name: patroni
         state: started
@@ -350,20 +351,20 @@
         state: started
         delay: 10
 
-    - name: "6.3 | Проверяем что pg2 стал репликой"
+    - name: "6.3 | Проверяем что {{ inventory_hostname }} стал репликой"
       uri:
         url: "http://{{ patroni_node_ip }}:{{ patroni_api_port }}/replica"
         method: GET
         status_code: 200
-      register: pg2_replica_check
+      register: replica_check
       retries: 18
       delay: 10
-      until: pg2_replica_check.status == 200
+      until: replica_check.status == 200
 
-    - name: "6.4 | pg2 успешно подключился как replica!"
+    - name: "6.4 | {{ inventory_hostname }} успешно подключился как replica!"
       debug:
         msg:
-          - "pg2 ({{ patroni_node_ip }}) является РЕПЛИКОЙ"
+          - "{{ inventory_hostname }} ({{ patroni_node_ip }}) является РЕПЛИКОЙ"
           - "Streaming replication с pg1 ({{ hostvars['pg1']['patroni_node_ip'] }}) активна"
 
     # Финальный вывод — показываем полный кластер
@@ -398,10 +399,13 @@
           environment:
             PGPASSWORD: "{{ patroni_superuser_password }}"
           changed_when: false
+          # Запись идёт на общий primary — выполняем один раз, а не на каждой
+          # реплике (иначе параллельный DDL с разных нод конфликтует).
+          run_once: true
           # PGPASSWORD в окружении — прячем таск из лога.
           no_log: true
 
-        - name: "Читаем данные с реплики (pg2) — проверяем streaming replication"
+        - name: "Читаем данные с реплики ({{ inventory_hostname }}) — проверяем streaming replication"
           command: >
             psql
             -h {{ patroni_node_ip }}
@@ -432,4 +436,6 @@
           environment:
             PGPASSWORD: "{{ patroni_superuser_password }}"
           changed_when: false
+          # Удаляем один раз на primary — после того как все реплики прочитали.
+          run_once: true
           no_log: true

@@ -112,6 +112,9 @@ bootstrap:
         wal_level: {{ postgresql_wal_level }}
         # Разрешить чтение с hot standby реплики
         hot_standby: "{{ postgresql_hot_standby }}"
+        # Реплика держит catalog_xmin на primary — без этого логический
+        # слот на standby инвалидируется при vacuum. Reload, без рестарта.
+        hot_standby_feedback: "{{ postgresql_hot_standby_feedback }}"
         max_connections: {{ postgresql_max_connections }}
         # Количество WAL sender процессов (для реплик)
         max_wal_senders: {{ postgresql_max_wal_senders }}
@@ -208,6 +211,25 @@ postgresql:
     rewind:
       username: {{ patroni_superuser }}
       password: {{ patroni_superuser_password }}
+
+{% if patroni_ignore_slots | default([]) %}
+# ----------------------------------------------------------
+# ignore_slots — слоты, которыми Patroni НЕ управляет.
+# Защищает вручную созданные логические слоты (logical decoding on
+# standby) от удаления при реконсиляции слотов, в т.ч. при смене лидера.
+# ----------------------------------------------------------
+ignore_slots:
+{% for slot in patroni_ignore_slots %}
+  - name: {{ slot.name }}
+    type: {{ slot.type }}
+{% if slot.database is defined %}
+    database: {{ slot.database }}
+{% endif %}
+{% if slot.plugin is defined %}
+    plugin: {{ slot.plugin }}
+{% endif %}
+{% endfor %}
+{% endif %}
 
 # ----------------------------------------------------------
 # Watchdog — аппаратная защита от split-brain

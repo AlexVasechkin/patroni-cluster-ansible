@@ -13,27 +13,31 @@
 ## Архитектура
 
 ```
-                     ┌─────────────────────────────────────────┐
-                     │        etcd cluster (DCS, кворум)         │
-                     │  etcd1        etcd2        etcd3          │
-                     │  .11          .12          .13           │
-                     └───────────────┬───────────────────────── ┘
-                                     │ хранит: лидера, конфиг кластера
-                     ┌───────────────┴───────────────┐
-                     ▼                                ▼
-         ┌───────────────────────┐        ┌───────────────────────┐
-         │  pg1  172.20.0.21      │◀──────▶│  pg2  172.20.0.22      │
-         │  PostgreSQL + Patroni  │ stream │  PostgreSQL + Patroni  │
-         │  (primary)             │  repl  │  (replica)             │
-         └───────────┬───────────┘        └───────────────────────┘
-                     ▲                                │
-   клиенты ─────────┐│                               │ archive-push (WAL)
-                    ││                                ▼
-         ┌──────────┴┴──────────┐        ┌───────────────────────┐
-         │  pgbouncer1  .30      │        │  backup1  172.20.0.40  │
-         │  connection pooler    │        │  pgBackRest repo       │
-         │  :6432 → primary      │        │  бэкапы + архив WAL    │
-         └───────────────────────┘        └───────────────────────┘
+                  ┌──────────────────────────────────────────┐
+                  │         etcd cluster (DCS, кворум)         │
+                  │   etcd1 .11    etcd2 .12    etcd3 .13      │
+                  └─────────────────────┬──────────────────────┘
+                                        │ хранит: лидера, конфиг кластера
+         ┌──────────────────────────────┼──────────────────────────────┐
+         ▼                              ▼                              ▼
+┌───────────────────┐        ┌───────────────────┐        ┌───────────────────┐
+│  pg1 172.20.0.21  │  repl  │  pg2 172.20.0.22  │  repl  │  pg3 172.20.0.23  │
+│   PG + Patroni    │───────▶│   PG + Patroni    │   ┌───▶│   PG + Patroni    │
+│     (primary)     │────────────────────────────────┘   │     (replica)     │
+└───────────────────┘        └───────────────────┘        └───────────────────┘
+     ▲            │
+     │ клиенты    │ archive-push (WAL)
+     │            ▼
+┌───────────────────┐        ┌────────────────────────┐
+│  pgbouncer1  .30  │        │  backup1  172.20.0.40   │
+│  connection pool  │        │  pgBackRest repo        │
+│  :6432 → primary  │        │  бэкапы + архив WAL     │
+└───────────────────┘        └────────────────────────┘
+
+  Потоки: etcd ↔ все Patroni-ноды (выбор лидера);
+          primary → pg2, pg3 (streaming replication);
+          клиенты → pgbouncer1 → текущий primary;
+          primary → backup1 (archive-push WAL, pgBackRest).
 ```
 
 ### Узлы
@@ -45,6 +49,7 @@
 | `etcd3`      | 172.20.0.13   | etcd (DCS)                            | 2223     | 2383→2379, 2384→2380     |
 | `pg1`        | 172.20.0.21   | PostgreSQL 16 + Patroni (primary)     | 2224     | 5432, 8008               |
 | `pg2`        | 172.20.0.22   | PostgreSQL 16 + Patroni (replica)     | 2225     | 5433→5432, 8009→8008     |
+| `pg3`        | 172.20.0.23   | PostgreSQL 16 + Patroni (replica)     | 2228     | 5434→5432, 8010→8008     |
 | `pgbouncer1` | 172.20.0.30   | PgBouncer (connection pooler)         | 2226     | 6432                     |
 | `backup1`    | 172.20.0.40   | pgBackRest (репозиторий бэкапов)      | 2227     | —                        |
 
@@ -61,7 +66,7 @@
 
 - Docker + Docker Compose
 - Ansible (core 2.20+) на хост-машине
-- `ssh-keygen`, `ssh-keyscan`, свободные порты `2221–2227`, `5432/5433`, `6432`, `8008/8009`
+- `ssh-keygen`, `ssh-keyscan`, свободные порты `2221–2228`, `5432–5434`, `6432`, `8008–8010`
 
 ---
 
@@ -111,7 +116,7 @@ psql -h localhost -p 6432 -U postgres -d postgres
 | Плейбук                       | Назначение                                                                 |
 |-------------------------------|----------------------------------------------------------------------------|
 | `01_etcd_playbook.yml`        | Установка и настройка etcd-кластера (3 ноды, systemd, healthcheck).         |
-| `02_patroni_playbook.yml`     | PostgreSQL 16 + Patroni: primary (pg1), затем реплика (pg2).                |
+| `02_patroni_playbook.yml`     | PostgreSQL 16 + Patroni: primary (pg1), затем реплики (pg2, pg3).           |
 | `03_pgbouncer_playbook.yml`   | PgBouncer + перевод pg_hba `md5 → scram-sha-256`.                           |
 | `04_pgbackrest_playbook.yml`  | pgBackRest: SSH repo↔db, `archive_mode`, stanza, первый full backup, cron. |
 | `05_pitr_demo_playbook.yml`   | **Разрушающая** демонстрация PITR — пересобирает кластер из бэкапа.         |
@@ -316,7 +321,7 @@ docker compose logs -f pg1        # логи узла
 ```
 
 Данные PostgreSQL и репозиторий бэкапов живут в именованных Docker-томах
-(`patroni_pg1_data`, `patroni_pg2_data`, `patroni_backup_repo`) и переживают
+(`patroni_pg1_data`, `patroni_pg2_data`, `patroni_pg3_data`, `patroni_backup_repo`) и переживают
 `docker compose down`.
 
 ---
