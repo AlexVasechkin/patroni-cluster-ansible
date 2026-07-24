@@ -325,6 +325,40 @@ docker exec ${NODE} etcdctl --cacert=/etc/etcd/certs/ca.crt \
 > тем же CA. Идемпотентная генерация сама по себе **не** продлевает серт при
 > приближении срока — нужно удалить старый файл.
 
+### Patroni REST API (basic auth)
+
+REST API Patroni (порт `8008`) защищён HTTP basic-auth. По задумке Patroni auth
+требуется только на **небезопасных** эндпоинтах (`POST/PUT/PATCH/DELETE`:
+`/restart`, `/switchover`, `/failover`, `/reload`, изменение конфига). Read-only
+`GET` (`/health`, `/leader`, `/replica`, `/primary`, `/patroni`) остаются
+**открытыми** — их дёргают healthcheck'и, балансировщики, `pgbouncer-update-primary.sh`
+и `uri`-таски плейбуков.
+
+- Учётка задаётся в `group_vars/postgres.yml`: `patroni_restapi_username`
+  (по умолчанию `patroni`) + `patroni_restapi_password` (из ansible-vault,
+  `vault_patroni_restapi_password`). Пустой username **отключает** auth.
+- Рендерится в секцию `restapi.authentication` файла `patroni.yml` на всех
+  pg-нодах. Патрони-ноды используют эти же креды для запросов друг к другу.
+- `patronictl` берёт креды из того же `patroni.yml` — `restart`/`switchover`
+  работают без дополнительных флагов.
+- Смена учётки применяется **рестартом** Patroni (перегенерировать `patroni.yml`
+  и `systemctl restart patroni` по очереди на нодах).
+
+```bash
+# GET открыт (healthcheck)
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8008/health          # 200
+
+# небезопасный эндпоинт без креды — отказ
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST http://127.0.0.1:8008/reload    # 401
+
+# с кредой — выполняется
+curl -s -o /dev/null -w '%{http_code}\n' -XPOST \
+  -u patroni:<пароль> http://127.0.0.1:8008/reload                              # 202
+```
+
+> Basic-auth **не** шифрует канал — пароль идёт по http в base64. TLS на REST API
+> (https) — отдельный шаг (см. `prod-plan.todo`, раздел 2).
+
 ### Замена всех паролей для production
 
 Учебные пароли (`postgres_pass`, `replicator_pass`) и авто-сгенерированный

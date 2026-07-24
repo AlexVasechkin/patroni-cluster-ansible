@@ -27,6 +27,14 @@ restapi:
   listen: {{ postgresql_listen_address }}:{{ patroni_api_port }}
   # Адрес, по которому другие ноды и балансировщики видят этот API
   connect_address: {{ patroni_node_ip }}:{{ patroni_api_port }}
+{% if patroni_restapi_username %}
+  # Basic-auth на НЕбезопасные эндпоинты (restart/switchover/failover/reload,
+  # изменение конфига). GET-эндпоинты (health/leader/replica) остаются
+  # открытыми для healthcheck'ов и балансировщиков — так задумано Patroni.
+  authentication:
+    username: {{ patroni_restapi_username }}
+    password: {{ patroni_restapi_password }}
+{% endif %}
 
 # ----------------------------------------------------------
 # DCS: etcd v3 API

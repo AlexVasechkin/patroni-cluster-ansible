@@ -16,6 +16,14 @@ patroni_etcd_ca_cert: "{{ patroni_etcd_cert_dir }}/ca.crt"
 patroni_etcd_client_cert: "{{ patroni_etcd_cert_dir }}/client.crt"
 patroni_etcd_client_key: "{{ patroni_etcd_cert_dir }}/client.key"
 
+# Basic-auth Patroni REST API. Защищает НЕбезопасные эндпоинты (POST/PUT/PATCH/
+# DELETE: /restart, /switchover, /failover, /reload, изменение конфига).
+# Read-only GET (/health, /leader, /replica, /patroni) остаются открытыми —
+# их дёргают healthcheck'и, pgbouncer-скрипт и uri-таски плейбуков.
+# Пустой username отключает auth. Пароль — из ansible-vault.
+patroni_restapi_username: "patroni"
+patroni_restapi_password: "{{ vault_patroni_restapi_password }}"
+
 # Порты
 postgresql_port: 5432
 # patroni_api_port перенесён в all.yml (нужен pgbouncer-скрипту)
