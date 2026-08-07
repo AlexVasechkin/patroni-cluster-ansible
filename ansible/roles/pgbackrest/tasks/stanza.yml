@@ -15,9 +15,14 @@
   become_user: "{{ pgbackrest_repo_user }}"
   register: pgbackrest_stanza_create
   # stanza-create идемпотентна: повторный запуск на готовой stanza
-  # завершается успешно и ничего не меняет. pgBackRest пишет лог в stderr.
+  # завершается успешно ("completed successfully"), но ДОПОЛНИТЕЛЬНО печатает
+  # "already exists ... and is valid" — значит ничего не создано. Поэтому
+  # changed = успех И отсутствие пометки "already exists" (иначе таск всегда
+  # рапортует changed на повторных прогонах). pgBackRest пишет лог в stdout.
   changed_when: >-
     'completed successfully' in
+    (pgbackrest_stanza_create.stdout + pgbackrest_stanza_create.stderr)
+    and 'already exists' not in
     (pgbackrest_stanza_create.stdout + pgbackrest_stanza_create.stderr)
 
 - name: "check — проверяем archive_command и доступность репозитория"
@@ -37,10 +42,12 @@
   when: (pgbackrest_info_json.stdout | from_json | first).backup | length == 0
 
 # ----------------------------------------------------------
-# Расписание регулярных бэкапов через cron.
-# full — еженедельно, incr — ежедневно. Архивирование WAL идёт
-# непрерывно (archive_command), поэтому PITR возможен на любой
-# момент между бэкапами.
+# Расписание регулярных операций через cron (см. переменные
+# pgbackrest_schedule_* в defaults). Дефолт под критичные данные:
+#   full — еженедельно, diff — ежедневно, incr — ежечасно, verify — еженедельно.
+# Непрерывная архивация WAL (archive_command) держит RPO ~секунды и
+# обеспечивает PITR на любую точку между бэкапами; частый incr сокращает
+# окно доигрывания WAL при восстановлении (меньше RTO).
 # ----------------------------------------------------------
 # Минимальный образ Ubuntu не содержит cron — ставим пакет и запускаем сервис,
 # иначе модуль ansible.builtin.cron не найдёт бинарь crontab, а задания не пойдут.
@@ -56,7 +63,7 @@
     state: started
     enabled: true
 
-- name: "Устанавливаем скрипт-обёртку для бэкапов"
+- name: "Устанавливаем скрипт-обёртку для бэкапов/verify"
   template:
     src: pgbackrest-backup.sh.j2
     dest: /usr/local/bin/pgbackrest-backup.sh
@@ -64,20 +71,38 @@
     group: "{{ pgbackrest_repo_user }}"
     mode: "0755"
 
-- name: "cron: полный бэкап еженедельно (вс, 02:00)"
+- name: "cron: полный бэкап (full)"
   cron:
     name: "pgbackrest full backup"
     user: "{{ pgbackrest_repo_user }}"
-    weekday: "0"
-    hour: "2"
-    minute: "0"
+    minute: "{{ pgbackrest_schedule_full.minute }}"
+    hour: "{{ pgbackrest_schedule_full.hour }}"
+    weekday: "{{ pgbackrest_schedule_full.weekday }}"
     job: "/usr/local/bin/pgbackrest-backup.sh full"
 
-- name: "cron: инкрементальный бэкап ежедневно (пн–сб, 02:00)"
+- name: "cron: разностный бэкап (diff)"
+  cron:
+    name: "pgbackrest diff backup"
+    user: "{{ pgbackrest_repo_user }}"
+    minute: "{{ pgbackrest_schedule_diff.minute }}"
+    hour: "{{ pgbackrest_schedule_diff.hour }}"
+    weekday: "{{ pgbackrest_schedule_diff.weekday }}"
+    job: "/usr/local/bin/pgbackrest-backup.sh diff"
+
+- name: "cron: инкрементальный бэкап (incr)"
   cron:
     name: "pgbackrest incr backup"
     user: "{{ pgbackrest_repo_user }}"
-    weekday: "1-6"
-    hour: "2"
-    minute: "0"
+    minute: "{{ pgbackrest_schedule_incr.minute }}"
+    hour: "{{ pgbackrest_schedule_incr.hour }}"
+    weekday: "{{ pgbackrest_schedule_incr.weekday }}"
     job: "/usr/local/bin/pgbackrest-backup.sh incr"
+
+- name: "cron: проверка целостности репозитория (verify)"
+  cron:
+    name: "pgbackrest verify"
+    user: "{{ pgbackrest_repo_user }}"
+    minute: "{{ pgbackrest_schedule_verify.minute }}"
+    hour: "{{ pgbackrest_schedule_verify.hour }}"
+    weekday: "{{ pgbackrest_schedule_verify.weekday }}"
+    job: "/usr/local/bin/pgbackrest-backup.sh verify"

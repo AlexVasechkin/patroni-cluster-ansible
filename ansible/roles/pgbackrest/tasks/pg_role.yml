@@ -1,0 +1,91 @@
+---
+# ============================================================
+# pg_role.yml — выделенная РОЛЬ PostgreSQL для pgBackRest.
+#
+# Цель: pgBackRest подключается к PostgreSQL НЕ суперпользователем postgres,
+# а отдельной non-superuser ролью с минимальными правами.
+#
+# Запускается на группе postgres, но SQL (CREATE/ALTER/GRANT) выполняется
+# ТОЛЬКО на текущем primary (реплики read-only) — определяем через
+# pg_is_in_recovery(). Изменения реплицируются на standby автоматически.
+#
+# Все проверки идут через локальный сокет под OS-пользователем postgres
+# (для служебных задач это допустимо; сама РОЛЬ pgbackrest ходит по scram).
+# ============================================================
+
+- name: "Определяем, является ли нода primary"
+  command: psql -tAc "SELECT NOT pg_is_in_recovery();"
+  become_user: postgres
+  register: pgbackrest_is_primary
+  changed_when: false
+
+# ----------------------------------------------------------
+# 1. Проверка существования роли (явный шаг, как просили).
+# ----------------------------------------------------------
+- name: "Проверяем, существует ли роль {{ pgbackrest_pg_user }}"
+  command: >-
+    psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = '{{ pgbackrest_pg_user }}';"
+  become_user: postgres
+  register: pgbackrest_role_check
+  changed_when: false
+  when: pgbackrest_is_primary.stdout | trim == 't'
+
+- name: "Статус роли {{ pgbackrest_pg_user }}"
+  debug:
+    msg: >-
+      Роль {{ pgbackrest_pg_user }}
+      {{ 'уже существует' if (pgbackrest_role_check.stdout | default('') | trim == '1')
+         else 'отсутствует — будет создана' }}
+  when: pgbackrest_is_primary.stdout | trim == 't'
+
+# ----------------------------------------------------------
+# 2. Создание роли (только если её ещё нет).
+#    Пароль передаём через stdin, а не -c/argv — иначе он утечёт в
+#    список процессов и в логи. no_log прячет таск целиком.
+# ----------------------------------------------------------
+- name: "Создаём роль {{ pgbackrest_pg_user }} (LOGIN, non-superuser)"
+  command:
+    cmd: psql -v ON_ERROR_STOP=1 -f -
+    stdin: >-
+      CREATE ROLE {{ pgbackrest_pg_user }} WITH LOGIN PASSWORD
+      '{{ pgbackrest_pg_password }}';
+  become_user: postgres
+  no_log: true
+  when:
+    - pgbackrest_is_primary.stdout | trim == 't'
+    - pgbackrest_role_check.stdout | default('') | trim != '1'
+
+# Синхронизируем пароль на случай ротации в vault (идемпотентно, без утечки).
+- name: "Синхронизируем пароль роли {{ pgbackrest_pg_user }}"
+  command:
+    cmd: psql -v ON_ERROR_STOP=1 -f -
+    stdin: >-
+      ALTER ROLE {{ pgbackrest_pg_user }} WITH LOGIN PASSWORD
+      '{{ pgbackrest_pg_password }}';
+  become_user: postgres
+  no_log: true
+  changed_when: false
+  when: pgbackrest_is_primary.stdout | trim == 't'
+
+# ----------------------------------------------------------
+# 3. Выдача МИНИМАЛЬНЫХ прав (проверено на PG 16 — достаточно для
+#    stanza-create / check / backup):
+#      - EXECUTE на 4 backup-функции (нет предопределённой роли, которая
+#        бы их давала — гранты обязательно явные);
+#      - pg_read_all_settings — СТАНДАРТНАЯ роль, обязательна (иначе
+#        pgBackRest падает с "unable to select some rows from pg_settings").
+#    REPLICATION и SUPERUSER НЕ нужны.
+#    GRANT идемпотентен → changed_when: false (декларативное желаемое состояние).
+# ----------------------------------------------------------
+- name: "Выдаём права роли {{ pgbackrest_pg_user }}"
+  command:
+    cmd: psql -v ON_ERROR_STOP=1 -f -
+    stdin: |
+      GRANT EXECUTE ON FUNCTION pg_backup_start(text, boolean) TO {{ pgbackrest_pg_user }};
+      GRANT EXECUTE ON FUNCTION pg_backup_stop(boolean)        TO {{ pgbackrest_pg_user }};
+      GRANT EXECUTE ON FUNCTION pg_switch_wal()                TO {{ pgbackrest_pg_user }};
+      GRANT EXECUTE ON FUNCTION pg_create_restore_point(text)  TO {{ pgbackrest_pg_user }};
+      GRANT pg_read_all_settings TO {{ pgbackrest_pg_user }};
+  become_user: postgres
+  changed_when: false
+  when: pgbackrest_is_primary.stdout | trim == 't'

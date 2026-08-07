@@ -1,16 +1,56 @@
 #!/usr/bin/env bash
 # ============================================================
-# pgbackrest-backup.sh — обёртка для регулярных бэкапов (cron)
+# pgbackrest-backup.sh — обёртка для регулярных операций (cron)
 # Сгенерировано Ansible (роль pgbackrest)
 #
-# Тип бэкапа передаётся аргументом:
-#   full  — полный (полная копия кластера)
+# Аргумент — действие:
+#   full  — полный бэкап (полная копия кластера)
 #   diff  — разностный (изменения с последнего full)
 #   incr  — инкрементальный (изменения с последнего любого бэкапа)
+#   verify — проверка целостности репозитория (без бэкапа)
+#
+# Логирует в syslog (tag pgbackrest-<action>) и на stdout; пробрасывает
+# exit code наружу, чтобы cron/мониторинг видели сбой. Точку алертинга
+# см. в функции notify_failure ниже.
 # ============================================================
 set -euo pipefail
 
 STANZA="{{ pgbackrest_stanza }}"
-TYPE="${1:-incr}"
+ACTION="${1:-incr}"
+TAG="pgbackrest-${ACTION}"
 
-exec pgbackrest --stanza="$STANZA" --type="$TYPE" backup
+log() {
+    # в syslog (если есть logger) и всегда на stdout
+    logger -t "$TAG" -- "$*" 2>/dev/null || true
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [$TAG] $*"
+}
+
+notify_failure() {
+    # TODO: врезать реальный алертинг для финтеха, напр.:
+    #   curl -sf -m 10 -X POST "$ALERT_WEBHOOK" -d "pgbackrest $ACTION failed rc=$1" || true
+    log "ALERT: операция '$ACTION' завершилась с ошибкой (rc=$1)"
+}
+
+run() {
+    case "$ACTION" in
+        full|diff|incr)
+            pgbackrest --stanza="$STANZA" --type="$ACTION" backup
+            ;;
+        verify)
+            pgbackrest --stanza="$STANZA" verify
+            ;;
+        *)
+            log "неизвестное действие '$ACTION' (ожидается full|diff|incr|verify)"
+            exit 2
+            ;;
+    esac
+}
+
+log "старт: $ACTION (stanza=$STANZA)"
+if run; then
+    log "успех: $ACTION"
+else
+    rc=$?
+    notify_failure "$rc"
+    exit "$rc"
+fi

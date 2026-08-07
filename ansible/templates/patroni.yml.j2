@@ -156,6 +156,13 @@ bootstrap:
     - host replication {{ patroni_replication_user }} {{ cluster_subnet }} {{ patroni_pg_hba_auth_method }}
     # Доступ приложений
     - host all all {{ patroni_pg_hba_app_cidr }} {{ patroni_pg_hba_auth_method }}
+{% if pgbackrest_enabled | default(false) %}
+    # pgBackRest: выделенная роль ходит по сокету со scram (без trust/postgres).
+    # ВАЖНО: правило идёт ВЫШЕ "local all all trust", иначе trust перехватит
+    # роль первым и пароль проверяться не будет. В production строку trust ниже
+    # убирают — тогда это правило становится единственным способом входа роли.
+    - local {{ pgbackrest_pg_database }} {{ pgbackrest_pg_user }} scram-sha-256
+{% endif %}
     # Локальный доступ (для patronictl, healthcheck)
     - local all all trust
 

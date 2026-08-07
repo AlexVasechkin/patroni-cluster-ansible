@@ -107,14 +107,38 @@
         msg: "{{ edit_config_result.stdout_lines }}"
 
     # archive_mode читается только при старте PostgreSQL → нужен рестарт.
-    # Рестартуем ВСЕ ноды кластера явно (не --pending): флаг pending-restart
-    # выставляется Patroni лишь на следующем HA-цикле, поэтому --pending сразу
-    # после edit-config может ничего не рестартовать (race). Кратковременное
-    # прерывание записи на primary — ожидаемо (учебно).
-    - name: "3.2 | Рестартуем кластер для применения archive_mode"
+    #
+    # КРИТИЧНО (была гонка): edit-config лишь пишет параметр в DCS. Каждая нода
+    # применяет его к своему postgresql.conf и выставляет флаг pending-restart
+    # только на СЛЕДУЮЩЕМ HA-цикле (loop_wait). Если рестартовать сразу, лидер
+    # успевает перезапуститься со СТАРЫМ конфигом (archive_mode=off) — реплики
+    # же обычно перезапускаются чуть позже и подхватывают новый, из-за чего
+    # archive_mode оказывается off ТОЛЬКО на primary, а pgbackrest check падает
+    # (ERROR [087]: archive_mode must be enabled).
+    #
+    # Поэтому: сначала ДОЖИДАЕМСЯ, пока Patroni на ВСЕХ нодах впишет archive_mode
+    # в локальный конфиг и отметит pending-restart, и только затем рестартуем
+    # (уже безопасно и точечно — только помеченные ноды).
+    - name: "3.2 | Ждём, пока Patroni отметит pending-restart на всех нодах"
       command: >
         patronictl -c {{ patroni_config_dir }}/patroni.yml
-        restart {{ patroni_cluster_name }} --force
+        list {{ patroni_cluster_name }} --format json
+      become_user: postgres
+      register: pending_state
+      retries: 12
+      delay: 5
+      # 'Pending restart' присутствует в JSON только у нод с ожидающим рестартом.
+      # Ждём, пока флаг появится у ВСЕХ членов кластера.
+      until: >
+        (pending_state.stdout | from_json | selectattr('Pending restart', 'defined')
+         | list | length) == (pending_state.stdout | from_json | length)
+      changed_when: false
+      when: edit_config_result.changed
+
+    - name: "3.3 | Рестартуем ноды с pending-restart (применить archive_mode)"
+      command: >
+        patronictl -c {{ patroni_config_dir }}/patroni.yml
+        restart {{ patroni_cluster_name }} --pending --force
       become_user: postgres
       register: restart_result
       # Рестартуем только если edit-config реально изменил параметры
@@ -122,7 +146,7 @@
       when: edit_config_result.changed
       changed_when: true
 
-    - name: "3.3 | Ждём, пока обе ноды снова running"
+    - name: "3.4 | Ждём, пока все ноды снова running"
       command: >
         patronictl -c {{ patroni_config_dir }}/patroni.yml
         list {{ patroni_cluster_name }} --format json
@@ -154,6 +178,54 @@
       retries: 12
       delay: 5
       changed_when: false
+
+
+# ==============================================================
+# PLAY 3c: Выделенная роль PostgreSQL для pgBackRest + pg_hba
+#
+# Готовим подключение pgBackRest БЕЗ суперпользователя postgres:
+#   - создаём non-superuser роль pgbackrest и выдаём минимальные права
+#     (SQL выполняется на primary, реплицируется на standby);
+#   - добавляем в pg_hba правило "local <db> pgbackrest scram-sha-256"
+#     ВЫШЕ "local all all trust", чтобы роль ходила по паролю (scram),
+#     а не через trust. Пароль pgBackRest берёт из ~/.pgpass (создан в PLAY 1).
+#
+# Должно выполниться ДО PLAY 4 (stanza-create/check/backup уже коннектятся
+# к БД под ролью pgbackrest).
+# ==============================================================
+- name: "PLAY 3c | Роль pgbackrest в PostgreSQL и правило pg_hba"
+  hosts: postgres
+  become: true
+  vars:
+    pgbackrest_enabled: true
+
+  tasks:
+
+    - name: "3c.1 | Проверяем/создаём роль pgbackrest и выдаём права"
+      include_role:
+        name: pgbackrest
+        tasks_from: pg_role
+
+    # pg_hba в этом проекте задаётся только через bootstrap (одноразово),
+    # поэтому на ЖИВОМ кластере добавляем правило прямо в pg_hba.conf.
+    # insertbefore: BOF — строка встаёт в самое начало, ВЫШЕ initdb-строки
+    # "local all all trust", иначе trust перехватил бы роль первым.
+    - name: "3c.2 | Добавляем scram-правило pgbackrest в pg_hba.conf"
+      lineinfile:
+        path: "{{ postgresql_data_dir }}/pg_hba.conf"
+        line: "local {{ pgbackrest_pg_database }} {{ pgbackrest_pg_user }} scram-sha-256"
+        insertbefore: BOF
+        state: present
+        owner: postgres
+        group: postgres
+        mode: "0600"
+      register: pgbackrest_pg_hba
+
+    - name: "3c.3 | Перечитываем конфигурацию PostgreSQL (pg_hba)"
+      command: psql -tAc "SELECT pg_reload_conf();"
+      become_user: postgres
+      when: pgbackrest_pg_hba.changed
+      changed_when: true
 
 
 # ==============================================================

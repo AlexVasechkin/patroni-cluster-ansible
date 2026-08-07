@@ -133,3 +133,37 @@ pgbackrest_enabled: false
 
 # Максимальный интервал между переключениями WAL (ограничивает RPO).
 pgbackrest_archive_timeout: "60s"
+
+# ------------------------------------------------------------
+# Выделенная РОЛЬ PostgreSQL для pgBackRest (НЕ суперпользователь postgres).
+#
+# Важно не путать ДВА разных «пользователя»:
+#   - pgbackrest_repo_user (выше) — OS-пользователь на repo-хосте (SSH);
+#   - pgbackrest_pg_user (здесь)  — РОЛЬ в PostgreSQL, под которой pgBackRest
+#     делает libpq-подключение (pg_backup_start/stop, чтение настроек).
+#
+# pgBackRest подключается к PostgreSQL ТОЛЬКО через Unix-socket (TCP он к БД
+# не умеет). Поэтому «без postgres» = отдельная non-superuser роль + scram по
+# сокету; пароль pgBackRest берёт из ~/.pgpass OS-пользователя на ноде БД.
+# Права роли — минимальные (см. roles/pgbackrest/tasks/pg_role.yml).
+# ------------------------------------------------------------
+pgbackrest_pg_user: "pgbackrest"
+pgbackrest_pg_password: "{{ vault_pgbackrest_db_password }}"
+# База, к которой подключается pgBackRest (pg-database). Обычно postgres.
+pgbackrest_pg_database: "postgres"
+
+# ------------------------------------------------------------
+# Шифрование репозитория (client-side, aes-256-cbc).
+#
+# ВНИМАНИЕ: тип шифрования фиксируется при stanza-create и НЕ меняется на
+# существующем репозитории. Включение/смена шифрования на уже созданном репо
+# требует ПЕРЕИНИЦИАЛИЗАЦИИ (stanza-delete → stanza-create → новый full backup),
+# т.е. потери старых бэкапов. См. docs/03-backup-encryption.md.
+#
+# Парольная фраза — только в vault. При её утере ВСЕ бэкапы нерасшифровываемы,
+# поэтому хранить её ОТДЕЛЬНО от репозитория (секрет-менеджер/сейф).
+# В модели выделенного repo-хоста ключ живёт ТОЛЬКО на backup1 — db-ноды его
+# не видят (шифрует repo-хост), это дополнительный плюс к безопасности.
+# ------------------------------------------------------------
+pgbackrest_cipher_type: "aes-256-cbc"
+pgbackrest_cipher_pass: "{{ vault_pgbackrest_cipher_pass }}"

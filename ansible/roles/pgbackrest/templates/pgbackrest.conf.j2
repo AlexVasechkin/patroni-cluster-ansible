@@ -17,12 +17,21 @@ repo1-path={{ pgbackrest_repo_path }}
 {% if inventory_hostname in groups['backup'] %}
 
 # --- Хранение и шифрование (только на repo-хосте) ---
-# Держим последние N полных бэкапов; устаревшие full + их diff/incr +
-# ненужный уже архив WAL удаляются автоматически при expire.
+# Ретеншн full: при type=time значение — ЧИСЛО ДНЕЙ хранения (не штук).
+# Устаревшие full + их diff/incr + ненужный уже архив WAL удаляются при expire.
+# WAL для PITR держится на всю глубину ретеншна full → PITR на любую точку окна.
+repo1-retention-full-type={{ pgbackrest_retention_full_type }}
 repo1-retention-full={{ pgbackrest_retention_full }}
-# Шифрование репозитория. none — учебно; в production: aes-256-cbc
-# (+ repo1-cipher-pass в защищённом месте).
+{% if pgbackrest_retention_diff | default('') | string | length > 0 %}
+# Сколько diff держать внутри окна full (ограничивает разрастание diff).
+repo1-retention-diff={{ pgbackrest_retention_diff }}
+{% endif %}
+# Шифрование репозитория. none — без шифрования; aes-256-cbc — client-side.
+# Ключ (cipher-pass) держится ТОЛЬКО на repo-хосте — db-ноды его не видят.
 repo1-cipher-type={{ pgbackrest_cipher_type }}
+{% if pgbackrest_cipher_type != 'none' %}
+repo1-cipher-pass={{ pgbackrest_cipher_pass }}
+{% endif %}
 {% else %}
 
 # --- Доступ к выделенному repo-хосту (на db-нодах) ---
@@ -57,6 +66,9 @@ pg{{ loop.index }}-host-user={{ pgbackrest_db_os_user }}
 pg{{ loop.index }}-path={{ hostvars[node.name].postgresql_data_dir }}
 pg{{ loop.index }}-port={{ hostvars[node.name].postgresql_port | default(5432) }}
 pg{{ loop.index }}-socket-path={{ pgbackrest_pg_socket_path }}
+# Роль БД (НЕ суперпользователь postgres) и база для libpq-подключения.
+pg{{ loop.index }}-user={{ pgbackrest_pg_user }}
+pg{{ loop.index }}-database={{ pgbackrest_pg_database }}
 {% endfor %}
 {% else %}
 # db-нода знает только про СЕБЯ (локальный data_dir, индекс 1).
@@ -64,4 +76,8 @@ pg{{ loop.index }}-socket-path={{ pgbackrest_pg_socket_path }}
 pg1-path={{ postgresql_data_dir }}
 pg1-port={{ postgresql_port }}
 pg1-socket-path={{ pgbackrest_pg_socket_path }}
+# Роль БД (НЕ суперпользователь postgres) и база для libpq-подключения.
+# Пароль pgBackRest берёт из ~/.pgpass OS-пользователя (см. configure.yml).
+pg1-user={{ pgbackrest_pg_user }}
+pg1-database={{ pgbackrest_pg_database }}
 {% endif %}

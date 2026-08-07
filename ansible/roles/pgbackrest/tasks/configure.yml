@@ -37,13 +37,44 @@
     dest: "{{ pgbackrest_config_file }}"
     owner: "{{ pgbackrest_os_user }}"
     group: "{{ pgbackrest_os_user }}"
+    # 0640: cipher-pass в конфиге — секрет; читают только владелец и группа
+    # (оба — pgbackrest_os_user), остальным закрыто.
     mode: "0640"
 
 - name: "Показываем сгенерированный pgbackrest.conf"
   slurp:
     src: "{{ pgbackrest_config_file }}"
   register: pgbackrest_conf_content
+  # slurp тянет и cipher-pass — прячем результат из логов (в т.ч. при -v).
+  no_log: true
 
 - name: "Содержимое pgbackrest.conf на {{ inventory_hostname }}"
   debug:
-    msg: "{{ (pgbackrest_conf_content.content | b64decode).split('\n') }}"
+    # Строку repo1-cipher-pass в вывод НЕ включаем (маскируем секрет).
+    msg: >-
+      {{ (pgbackrest_conf_content.content | b64decode).split('\n')
+         | reject('search', 'cipher-pass') | list }}
+
+# ----------------------------------------------------------
+# ~/.pgpass для роли pgBackRest (только на нодах БД).
+#
+# libpq-подключение к PostgreSQL делает процесс pgBackRest, работающий на
+# самой ноде БД под OS-пользователем postgres. Пароль роли pgbackrest он
+# берёт из ~/.pgpass этого OS-пользователя — опции pg-password у pgBackRest
+# нет намеренно. Формат: host:port:database:user:password.
+#
+# ВАЖНО про host: для подключения по Unix-сокету libpq ищет запись по ключу
+# 'localhost' (НЕ по пути каталога сокета!) — проверено эмпирически. Путь
+# '/var/run/postgresql' в этом поле НЕ матчится. Поэтому host = localhost.
+# На repo-хосте .pgpass не нужен: он сам к БД не подключается (ходит по SSH).
+# ----------------------------------------------------------
+- name: "db-нода: ~/.pgpass для роли {{ pgbackrest_pg_user }}"
+  copy:
+    dest: "{{ pgbackrest_os_home }}/.pgpass"
+    owner: "{{ pgbackrest_os_user }}"
+    group: "{{ pgbackrest_os_user }}"
+    mode: "0600"
+    content: |
+      localhost:*:{{ pgbackrest_pg_database }}:{{ pgbackrest_pg_user }}:{{ pgbackrest_pg_password }}
+  no_log: true
+  when: inventory_hostname in groups['postgres']
